@@ -3,15 +3,15 @@ import threading, os
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "BOT IS RUNNING - TRADINGVIEW MODE 5 PAIRS"
+    return "BOT IS RUNNING - 100% TRADINGVIEW NO YAHOO"
 threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))).start()
 
 import time
 import requests
-import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta, timezone
-from tradingview_ta import TA_Handler, Interval, Exchange
+from tradingview_ta import TA_Handler, Interval as TA_Interval, Exchange
+from tvDatafeed import TvDatafeed, Interval as TV_Interval
 
 BD_TZ = timezone(timedelta(hours=6))
 def now_bd():
@@ -19,16 +19,15 @@ def now_bd():
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
-BALANCE = 307
 AMOUNT = 3
 
-# 5 PAIRS - Real Market TradingView
+# 5 PAIRS - 100% TradingView, Yahoo Nai
 PAIRS = {
-    "EUR/USD": {"tv_symbol": "EURUSD", "yahoo": "EURUSD=X"},
-    "GBP/USD": {"tv_symbol": "GBPUSD", "yahoo": "GBPUSD=X"},
-    "USD/JPY": {"tv_symbol": "USDJPY", "yahoo": "USDJPY=X"},
-    "AUD/USD": {"tv_symbol": "AUDUSD", "yahoo": "AUDUSD=X"},
-    "USD/CAD": {"tv_symbol": "USDCAD", "yahoo": "USDCAD=X"},
+    "EUR/USD": {"tv_symbol": "EURUSD", "tv_exchange": "OANDA"},
+    "GBP/USD": {"tv_symbol": "GBPUSD", "tv_exchange": "OANDA"},
+    "USD/JPY": {"tv_symbol": "USDJPY", "tv_exchange": "OANDA"},
+    "AUD/USD": {"tv_symbol": "AUDUSD", "tv_exchange": "OANDA"},
+    "USD/CAD": {"tv_symbol": "USDCAD", "tv_exchange": "OANDA"},
 }
 
 sent_signals = {}
@@ -37,6 +36,17 @@ today_loss = 0
 last_auto_check = 0
 last_update_id = 0
 last_signal_minute = ""
+tv_feed = None
+
+def get_tv_feed():
+    global tv_feed
+    if tv_feed is None:
+        try:
+            tv_feed = TvDatafeed()
+        except Exception as e:
+            print(f"TvDatafeed Login Error: {e}")
+            tv_feed = None
+    return tv_feed
 
 def send_telegram(msg):
     try:
@@ -46,12 +56,13 @@ def send_telegram(msg):
         print(f"Telegram Error: {e}")
 
 def get_tradingview_data(tv_symbol):
+    # RSI, EMA, Price - TradingView TA theke
     try:
         handler = TA_Handler(
             symbol=tv_symbol,
             screener="forex",
             exchange="OANDA",
-            interval=Interval.INTERVAL_1_MINUTE
+            interval=TA_Interval.INTERVAL_1_MINUTE
         )
         analysis = handler.get_analysis()
         ind = analysis.indicators
@@ -60,33 +71,35 @@ def get_tradingview_data(tv_symbol):
             "open": float(ind["open"]),
             "rsi": float(ind["RSI"]),
             "ema20": float(ind["EMA20"]),
-            "ema50": float(ind["EMA50"]),
         }
     except Exception as e:
-        print(f"TradingView Error {tv_symbol}: {e}")
+        print(f"TradingView TA Error {tv_symbol}: {e}")
         return None
 
-def get_candle_count(yahoo_symbol):
+def get_candle_count_tradingview(tv_symbol, tv_exchange):
+    # Last 10 Candel Count - TradingView History theke, Yahoo na
     try:
-        df = yf.download(yahoo_symbol, period="1d", interval="1m", progress=False)
-        if df.empty or len(df) < 11:
+        feed = get_tv_feed()
+        if feed is None:
             return 0, 0, True
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        last_10 = df.tail(10)
+        df = feed.get_hist(symbol=tv_symbol, exchange=tv_exchange, interval=TV_Interval.in_1_minute, n_bars=15)
+        if df is None or df.empty or len(df) < 11:
+            return 0, 0, True
+        # Last 10 ta candel (running candel bad diye ager 10 ta)
+        last_10 = df.tail(11).head(10)
         green = 0
         red = 0
         for i in range(len(last_10)):
             row = last_10.iloc[i]
-            if float(row['Close']) > float(row['Open']):
+            if float(row['close']) > float(row['open']):
                 green += 1
             else:
                 red += 1
-        last = df.iloc[-1]
-        last_green = float(last['Close']) > float(last['Open'])
+        last = df.iloc[-2]  # Last closed candel
+        last_green = float(last['close']) > float(last['open'])
         return green, red, last_green
     except Exception as e:
-        print(f"Candle Count Error: {e}")
+        print(f"TradingView History Error {tv_symbol}: {e}")
         return 0, 0, True
 
 def check_all_markets(manual=False):
@@ -107,25 +120,22 @@ def check_all_markets(manual=False):
         rsi = tv["rsi"]
         is_upore = price > ema
         is_niche = price < ema
-        green_count, red_count, last_green = get_candle_count(symbols["yahoo"])
+        green_count, red_count, last_green = get_candle_count_tradingview(symbols["tv_symbol"], symbols["tv_exchange"])
         last_red = not last_green
         direction = None
         reason = ""
         price_line = ""
         rule_name = ""
-        # PRIORITY 1: OP-1 RULE 1 BUY
         if green_count >= 6 and is_upore and 40 <= rsi <= 70:
             direction = "🟢 BUY"
             rule_name = "OP-1 Rule 1 [TradingView]"
             reason = f"OP-1: TradingView 10 Candel e {green_count} SOBUJ + UPORE (EMA {ema:.5f}) + RSI {round(rsi)} (40-70)"
             price_line = f"TradingView Price {price:.5f} - Quotex e ei dam er kachakachi dekhle BUY"
-        # PRIORITY 2: OP-1 RULE 2 SELL
         elif red_count >= 6 and is_niche and 30 <= rsi <= 60:
             direction = "🔴 SELL"
             rule_name = "OP-1 Rule 2 [TradingView]"
             reason = f"OP-1: TradingView 10 Candel e {red_count} LAL + NICHE (EMA {ema:.5f}) + RSI {round(rsi)} (30-60)"
             price_line = f"TradingView Price {price:.5f} - Quotex e ei dam er kachakachi dekhle SELL"
-        # PRIORITY 3: EXTRA STRONG
         elif green_count >= 9 and is_upore:
             direction = "🟢 BUY"
             rule_name = "EXTRA STRONG [TradingView]"
@@ -136,7 +146,6 @@ def check_all_markets(manual=False):
             rule_name = "EXTRA STRONG [TradingView]"
             reason = f"EXTRA STRONG: TradingView 10 Candel e {red_count}/10 LAL + NICHE + RSI {round(rsi)}"
             price_line = f"TradingView Price {price:.5f} - Quotex e ei dam er kachakachi dekhle SELL"
-        # PRIORITY 4: WAIT
         elif last_red and is_upore and 40 <= rsi <= 70:
             if manual:
                 send_telegram(f"⏳ {pair_name} - Rule 3: LAL + UPORE = WAIT [TradingView RSI {round(rsi)}]")
@@ -150,7 +159,7 @@ def check_all_markets(manual=False):
                 send_telegram(f"❌ {pair_name} - Kono Rule Milenai [TradingView]\n10 Candel: {green_count} SOBUJ / {red_count} LAL\nRSI {round(rsi)} | Price {price:.5f} | EMA {ema:.5f}")
             continue
         tag = "✋ MANUAL" if manual else "🤖 AUTO"
-        msg = f"""🚨 {tag} - TradingView Mode 5 Pairs
+        msg = f"""🚨 {tag} - 100% TradingView Mode
 📊 Asset: {pair_name}
 ⏱️ Expiry: M1
 🎯 Direction: {direction}
@@ -160,7 +169,7 @@ def check_all_markets(manual=False):
 ⚠️ Safety: 0-10s Dekhbo, 10-20s Trade, 20s+ NO TRADE
 ✅ Reason: {reason}
 💰 Amount: ${AMOUNT}
-📌 Note: Price TradingView er, Quotex e 1-2 pips alada hote pare"""
+📌 Note: 100% TradingView Data, Yahoo Nai"""
         send_telegram(msg)
         print(f"Signal TV: {pair_name} {direction} for {next_candle_time} - {rule_name}")
         sent_signals[next_candle_time] = {"pair": pair_name, "direction": direction, "tv_symbol": symbols["tv_symbol"], "entry_price": price, "entry_time": next_candle_time}
@@ -227,7 +236,7 @@ def check_telegram_commands():
             msg_data = upd.get("message", {})
             text = (msg_data.get("text") or "").strip().lower()
             if text == "signal":
-                send_telegram("🔍 TradingView 5 Pairs theke OP-1 + Extra Strong Analysis kortesi...")
+                send_telegram("🔍 100% TradingView theke OP-1 + Extra Strong Analysis kortesi...")
                 check_all_markets(manual=True)
             elif text == "win":
                 today_win += 1
@@ -242,8 +251,8 @@ def check_telegram_commands():
     except Exception as e:
         print(f"Telegram Poll Error: {e}")
 
-send_telegram("🤖 BOT UPDATED - TRADINGVIEW 5 PAIRS\n✅ EUR/USD, GBP/USD, USD/JPY, AUD/USD, USD/CAD\n✅ RSI/EMA TradingView OANDA theke\n✅ OP-1 + Extra Strong + Result Comparison")
-print("BOT Started - TRADINGVIEW 5 PAIRS")
+send_telegram("🤖 BOT UPDATED - 100% TRADINGVIEW NO YAHOO\n✅ RSI/EMA + Candle Count sob TradingView theke\n✅ EUR/USD, GBP/USD, USD/JPY, AUD/USD, USD/CAD")
+print("BOT Started - 100% TRADINGVIEW NO YAHOO")
 while True:
     try:
         now = now_bd()
