@@ -3,7 +3,7 @@ import threading, os
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "BOT RUNNING - OP-1 + SR FALLBACK"
+    return "BOT RUNNING - OP-1 + SR FALLBACK FIXED"
 threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))).start()
 
 import time
@@ -61,6 +61,7 @@ def get_sr_and_last_candle(tv_symbol, tv_exchange):
         r = requests.get(url, headers=headers, timeout=10)
         data = r.json()
         if data.get("s") != "ok" or "c" not in data:
+            print(f"SR No Data {tv_symbol}: {data}")
             return None
         highs = data["h"]
         lows = data["l"]
@@ -98,128 +99,137 @@ def check_all_markets(manual=False):
         return
     if not manual and next_candle_time in sent_signals:
         return
+
+    start_time = time.time()
+    checked = 0
+    failed_tv = 0
+    failed_sr = 0
+    wait_list = []
+
     for pair_name, symbols in PAIRS.items():
-        tv = get_tradingview_data(symbols["tv_symbol"])
-        if tv is None:
-            continue
-        sr = get_sr_and_last_candle(symbols["tv_symbol"], symbols["tv_exchange"])
-        if sr is None:
-            if manual:
-                send_telegram(f"❌ {pair_name} - Data Pawa Jay Nai")
-            continue
+        try:
+            checked += 1
+            print(f"Checking {pair_name}...")
+            tv = get_tradingview_data(symbols["tv_symbol"])
+            if tv is None:
+                failed_tv += 1
+                if manual:
+                    send_telegram(f"❌ {pair_name} - TradingView TA Data আসে নাই (Rate Limit / Network)")
+                continue
+            sr = get_sr_and_last_candle(symbols["tv_symbol"], symbols["tv_exchange"])
+            if sr is None:
+                failed_sr += 1
+                if manual:
+                    send_telegram(f"❌ {pair_name} - Support/Resistance History Data আসে নাই")
+                continue
 
-        price = tv["price"]
-        ema20 = tv["ema20"]
-        rsi = tv["rsi"]
-        support = sr["support"]
-        resistance = sr["resistance"]
-        last_green = sr["last_green"]
-        last_red = sr["last_red"]
+            price = tv["price"]
+            ema20 = tv["ema20"]
+            rsi = tv["rsi"]
+            support = sr["support"]
+            resistance = sr["resistance"]
+            last_green = sr["last_green"]
+            last_red = sr["last_red"]
 
-        is_sobuj = last_green
-        is_lal = last_red
-        is_upore = price > ema20
-        is_niche = price < ema20
+            is_sobuj = last_green
+            is_lal = last_red
+            is_upore = price > ema20
+            is_niche = price < ema20
 
-        dist_support_pct = abs(price - support) / price * 100 if price != 0 else 999
-        dist_resistance_pct = abs(price - resistance) / price * 100 if price != 0 else 999
-        near_support = dist_support_pct <= 0.12 or price < support
-        near_resistance = dist_resistance_pct <= 0.12 or price > resistance
-        breakout_up = price > resistance
-        breakdown_down = price < support
-        # SR Fallback er jonno aro tight distance
-        sr_near_support = dist_support_pct <= 0.08 and price > support
-        sr_near_resistance = dist_resistance_pct <= 0.08 and price < resistance
+            dist_support_pct = abs(price - support) / price * 100 if price != 0 else 999
+            dist_resistance_pct = abs(price - resistance) / price * 100 if price != 0 else 999
+            near_support = dist_support_pct <= 0.12 or price < support
+            near_resistance = dist_resistance_pct <= 0.12 or price > resistance
+            breakout_up = price > resistance
+            breakdown_down = price < support
+            sr_near_support = dist_support_pct <= 0.08 and price > support
+            sr_near_resistance = dist_resistance_pct <= 0.08 and price < resistance
 
-        min_range = 0.0004 if "JPY" not in pair_name else 0.04
-        if sr["range_pips"] < min_range:
-            if manual:
-                send_telegram(f"⏳ {pair_name} - FLAT MARKET = WAIT\nSupport {support:.5f} | Resistance {resistance:.5f}")
-            continue
+            min_range = 0.0004 if "JPY" not in pair_name else 0.04
+            if sr["range_pips"] < min_range:
+                wait_list.append(f"{pair_name} FLAT")
+                if manual:
+                    send_telegram(f"⏳ {pair_name} - FLAT MARKET = WAIT\nSupport {support:.5f} | Resistance {resistance:.5f}")
+                continue
 
-        direction = None
-        reason = ""
-        price_line = ""
-        rule_name = ""
-        signal_type = ""
+            direction = None
+            reason = ""
+            price_line = ""
+            rule_name = ""
+            signal_type = ""
 
-        # ===== STEP 1: OP-1 RULES - PRIORITY 1 =====
-        # Rule 1: SOBUJ + UPORE + RSI 40-70 + SR = BUY (STRONG)
-        if is_sobuj and is_upore and 40 <= rsi <= 70 and (near_support or breakout_up):
-            direction = "🟢 BUY"
-            rule_name = "Rule 1: SOBUJ + UPORE + RSI 40-70 + SR"
-            signal_type = "STRONG - OP-1"
-            sr_txt = "Breakout Above Resistance" if breakout_up else f"Support {support:.5f} er kache Bounce"
-            reason = f"OP-1 Rule 1: Last Candel SOBUJ + Price EMA20 ({ema20:.5f}) er UPORE + RSI {round(rsi)} (40-70) + SR: {sr_txt}"
-            price_line = f"Price {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f}"
+            # STEP 1: OP-1
+            if is_sobuj and is_upore and 40 <= rsi <= 70 and (near_support or breakout_up):
+                direction = "🟢 BUY"
+                rule_name = "Rule 1: SOBUJ + UPORE + RSI 40-70 + SR"
+                signal_type = "STRONG - OP-1"
+                sr_txt = "Breakout Above Resistance" if breakout_up else f"Support {support:.5f} er kache Bounce"
+                reason = f"OP-1 Rule 1: Last Candel SOBUJ + Price EMA20 ({ema20:.5f}) er UPORE + RSI {round(rsi)} (40-70) + SR: {sr_txt}"
+                price_line = f"Price {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f}"
+            elif is_lal and is_niche and 30 <= rsi <= 60 and (near_resistance or breakdown_down):
+                direction = "🔴 SELL"
+                rule_name = "Rule 2: LAL + NICHE + RSI 60-30 + SR"
+                signal_type = "STRONG - OP-1"
+                sr_txt = "Breakdown Below Support" if breakdown_down else f"Resistance {resistance:.5f} er kache Rejection"
+                reason = f"OP-1 Rule 2: Last Candel LAL + Price EMA20 ({ema20:.5f}) er NICHE + RSI {round(rsi)} (30-60) + SR: {sr_txt}"
+                price_line = f"Price {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f}"
+            # STEP 2: SR FALLBACK
+            elif sr_near_support and 25 <= rsi <= 55:
+                direction = "🟢 BUY"
+                rule_name = "SR-1: Support Bounce"
+                signal_type = "SR FALLBACK"
+                reason = f"OP-1 Milenai, SR Fallback: Price {price:.5f} Support {support:.5f} er kache (Dist {dist_support_pct:.3f}%) + RSI {round(rsi)} (25-55) + Support e dhakka kheye upore jabe"
+                price_line = f"Price {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f}"
+            elif sr_near_resistance and 45 <= rsi <= 75:
+                direction = "🔴 SELL"
+                rule_name = "SR-2: Resistance Rejection"
+                signal_type = "SR FALLBACK"
+                reason = f"OP-1 Milenai, SR Fallback: Price {price:.5f} Resistance {resistance:.5f} er kache (Dist {dist_resistance_pct:.3f}%) + RSI {round(rsi)} (45-75) + Resistance e dhakka kheye niche asbe"
+                price_line = f"Price {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f}"
+            elif breakout_up and 55 <= rsi <= 75:
+                direction = "🟢 BUY"
+                rule_name = "SR-3: Breakout BUY"
+                signal_type = "SR FALLBACK"
+                reason = f"OP-1 Milenai, SR Fallback: Price {price:.5f} Resistance {resistance:.5f} venge UPORE + RSI {round(rsi)} (55-75) + Strong Breakout"
+                price_line = f"Price {price:.5f} | Breakout Above Resistance {resistance:.5f}"
+            elif breakdown_down and 25 <= rsi <= 45:
+                direction = "🔴 SELL"
+                rule_name = "SR-4: Breakdown SELL"
+                signal_type = "SR FALLBACK"
+                reason = f"OP-1 Milenai, SR Fallback: Price {price:.5f} Support {support:.5f} venge NICHE + RSI {round(rsi)} (25-45) + Strong Breakdown"
+                price_line = f"Price {price:.5f} | Breakdown Below Support {support:.5f}"
+            else:
+                wait_list.append(f"{pair_name} WAIT")
+                if manual:
+                    send_telegram(f"⏳ {pair_name} - WAIT\nLast {'SOBUJ' if is_sobuj else 'LAL'} + {'UPORE' if is_upore else 'NICHE'} + RSI {round(rsi)}\nPrice {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f}\nDist S {dist_support_pct:.3f}% | Dist R {dist_resistance_pct:.3f}%")
+                continue
 
-        # Rule 2: LAL + NICHE + RSI 30-60 + SR = SELL (STRONG)
-        elif is_lal and is_niche and 30 <= rsi <= 60 and (near_resistance or breakdown_down):
-            direction = "🔴 SELL"
-            rule_name = "Rule 2: LAL + NICHE + RSI 60-30 + SR"
-            signal_type = "STRONG - OP-1"
-            sr_txt = "Breakdown Below Support" if breakdown_down else f"Resistance {resistance:.5f} er kache Rejection"
-            reason = f"OP-1 Rule 2: Last Candel LAL + Price EMA20 ({ema20:.5f}) er NICHE + RSI {round(rsi)} (30-60) + SR: {sr_txt}"
-            price_line = f"Price {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f}"
-
-        # ===== STEP 2: SR FALLBACK - JODI OP-1 NA MILE =====
-        # SR-1: Support Bounce BUY
-        elif sr_near_support and 25 <= rsi <= 55:
-            direction = "🟢 BUY"
-            rule_name = "SR-1: Support Bounce"
-            signal_type = "SR FALLBACK"
-            reason = f"OP-1 Milenai, SR Fallback: Price {price:.5f} Support {support:.5f} er kache (Dist {dist_support_pct:.3f}%) + RSI {round(rsi)} (25-55) + Support e dhakka kheye upore jabe"
-            price_line = f"Price {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f}"
-
-        # SR-2: Resistance Rejection SELL
-        elif sr_near_resistance and 45 <= rsi <= 75:
-            direction = "🔴 SELL"
-            rule_name = "SR-2: Resistance Rejection"
-            signal_type = "SR FALLBACK"
-            reason = f"OP-1 Milenai, SR Fallback: Price {price:.5f} Resistance {resistance:.5f} er kache (Dist {dist_resistance_pct:.3f}%) + RSI {round(rsi)} (45-75) + Resistance e dhakka kheye niche asbe"
-            price_line = f"Price {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f}"
-
-        # SR-3: Breakout BUY
-        elif breakout_up and 55 <= rsi <= 75:
-            direction = "🟢 BUY"
-            rule_name = "SR-3: Breakout BUY"
-            signal_type = "SR FALLBACK"
-            reason = f"OP-1 Milenai, SR Fallback: Price {price:.5f} Resistance {resistance:.5f} venge UPORE + RSI {round(rsi)} (55-75) + Strong Breakout"
-            price_line = f"Price {price:.5f} | Breakout Above Resistance {resistance:.5f}"
-
-        # SR-4: Breakdown SELL
-        elif breakdown_down and 25 <= rsi <= 45:
-            direction = "🔴 SELL"
-            rule_name = "SR-4: Breakdown SELL"
-            signal_type = "SR FALLBACK"
-            reason = f"OP-1 Milenai, SR Fallback: Price {price:.5f} Support {support:.5f} venge NICHE + RSI {round(rsi)} (25-45) + Strong Breakdown"
-            price_line = f"Price {price:.5f} | Breakdown Below Support {support:.5f}"
-
-        # ===== JODI KICCHU NA MILE = WAIT =====
-        else:
-            if manual:
-                # Konta keno milenai seta janano
-                op1_txt = f"OP-1: {'SOBUJ' if is_sobuj else 'LAL'} + {'UPORE' if is_upore else 'NICHE'} + RSI {round(rsi)}"
-                send_telegram(f"⏳ {pair_name} - WAIT\n{op1_txt} = OP-1 Milenai\nSR: Price {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f}\nDist Support {dist_support_pct:.3f}% | Dist Resistance {dist_resistance_pct:.3f}%\nEMA {ema20:.5f} | Middle Zone e ache, tai WAIT")
-            continue
-
-        tag = "✋ MANUAL" if manual else "🤖 AUTO"
-        msg = f"""🚨 {tag} - {signal_type}
+            tag = "✋ MANUAL" if manual else "🤖 AUTO"
+            msg = f"""🚨 {tag} - {signal_type}
 📊 Asset: {pair_name}
 ⏱️ Expiry: M1
 🎯 Direction: {direction}
 💰 Price: {price_line}
 🕒 Entry Time: {next_candle_time} (BD Time UTC+6)
-📩 Signal Time: {now.strftime('%H:%M:%S')} - Running Candel {now.strftime('%H:%M')} er 25-30s e Analysis
-⚠️ Safety: 0-10s Dekhbo, 10-20s Trade, 20s+ NO TRADE
+📩 Signal Time: {now.strftime('%H:%M:%S')}
 ✅ Reason: {reason}
-💰 Amount: ${AMOUNT}
-📌 Note: OP-1 na mille SR Fallback diye Candle to Candle Signal"""
-        send_telegram(msg)
-        print(f"Signal: {pair_name} {direction} for {next_candle_time} - {rule_name} - {signal_type}")
-        sent_signals[next_candle_time] = {"pair": pair_name, "direction": direction, "tv_symbol": symbols["tv_symbol"], "entry_price": price, "entry_time": next_candle_time}
-        last_signal_minute = next_candle_time
-        return
+💰 Amount: ${AMOUNT}"""
+            send_telegram(msg)
+            print(f"Signal: {pair_name} {direction} - {rule_name}")
+            sent_signals[next_candle_time] = {"pair": pair_name, "direction": direction, "tv_symbol": symbols["tv_symbol"], "entry_price": price, "entry_time": next_candle_time}
+            last_signal_minute = next_candle_time
+            return
+
+        except Exception as e:
+            print(f"Pair Error {pair_name}: {e}")
+            if manual:
+                send_telegram(f"❌ {pair_name} - Error: {e}")
+            continue
+
+    # LOOP SES - JODI KICHU NA MILE
+    if manual:
+        elapsed = round(time.time() - start_time, 1)
+        send_telegram(f"🏁 CHECK SES - {elapsed}s lagse\nChecked: {checked} Pair | TV Fail: {failed_tv} | SR Fail: {failed_sr}\nWAIT List: {', '.join(wait_list) if wait_list else 'Nai'}\nNote: Jodi TV Fail beshi hoy, TradingView Rate Limit hoise, 2 min por abar 'signal' likho")
 
 def check_results():
     global today_win, today_loss
@@ -260,8 +270,7 @@ def check_results():
 🎯 Direction: {pred['direction']}
 💰 Entry: {entry:.5f} -> Close: {close_price:.5f} (TradingView)
 {result_txt} {profit}
-📈 Total: {today_win} Win - {today_loss} Loss{extra}
-📌 Note: Eta TradingView Result. Quotex e alada hole 'win' / 'loss' likhe thik kore dao"""
+📈 Total: {today_win} Win - {today_loss} Loss{extra}"""
                 send_telegram(msg)
                 to_remove.append(candle_time)
         except Exception as e:
@@ -296,8 +305,8 @@ def check_telegram_commands():
     except Exception as e:
         print(f"Telegram Poll Error: {e}")
 
-send_telegram("🤖 BOT UPDATED - OP-1 + SR FALLBACK MODE\n✅ Step 1: OP-1 Rule 1/2 = STRONG Signal\n✅ Step 2: OP-1 na mille SR-1/2/3/4 = Candle to Candle Signal\n✅ SR-1 Support Bounce BUY | SR-2 Resistance Rejection SELL\n✅ SR-3 Breakout BUY | SR-4 Breakdown SELL")
-print("BOT Started - OP-1 + SR Fallback")
+send_telegram("🤖 BOT UPDATED - OP-1 + SR FALLBACK FIXED\n✅ Step 1: OP-1 Rule 1/2 = STRONG Signal\n✅ Step 2: OP-1 na mille SR-1/2/3/4 = Candle to Candle Signal\n✅ Ekhon Bot Ar Chup Thakbe Na - Fail holeo janabe")
+print("BOT Started - OP-1 + SR Fallback Fixed")
 while True:
     try:
         now = now_bd()
