@@ -53,7 +53,6 @@ def get_market_data(symbol):
         df['EMA20'] = df['Close'].ewm(span=20).mean()
         df['EMA50'] = df['Close'].ewm(span=50).mean()
         df['RSI'] = calculate_rsi(df['Close'])
-        df['Body'] = abs(df['Close'] - df['Open'])
         return df
     except Exception as e:
         print(f"Yahoo Error {symbol}: {e}")
@@ -88,7 +87,7 @@ def check_all_markets(manual=False):
         confidence = 0
         logic_type = ""
 
-        # === RULE 1 & 2 - LOOSE VERSION ===
+        # === RULE 1 & 2 - LOOSE ===
         if is_green and is_upore and 35 <= rsi <= 75:
             direction = "🟢 BUY"
             reason = f"Rule 1 Milse - SOBUJ + UPORE + RSI {round(rsi)}"
@@ -101,67 +100,74 @@ def check_all_markets(manual=False):
             price_line = f"{price:.5f} er upore ba borabor thakle SELL"
             confidence = 75 if 40 <= rsi <= 50 else 68
             logic_type = "RULE"
+        elif rsi < 30 and is_green:
+            direction = "🟢 BUY"
+            reason = f"Oversold Reversal - RSI {round(rsi)} < 30"
+            price_line = f"{price:.5f} er niche ba borabor thakle BUY"
+            confidence = 78
+            logic_type = "OTHER"
+        elif rsi > 70 and is_red:
+            direction = "🔴 SELL"
+            reason = f"Overbought Reversal - RSI {round(rsi)} > 70"
+            price_line = f"{price:.5f} er upore ba borabor thakle SELL"
+            confidence = 78
+            logic_type = "OTHER"
+        elif is_green and is_upore and float(prev['Close']) > float(prev['Open']) and ema > ema50:
+            direction = "🟢 BUY"
+            reason = f"Strong Uptrend - 3 Green + EMA20 > EMA50 + RSI {round(rsi)}"
+            price_line = f"{price:.5f} er niche ba borabor thakle BUY"
+            confidence = 82
+            logic_type = "OTHER"
+        elif is_red and is_niche and float(prev['Close']) < float(prev['Open']) and ema < ema50:
+            direction = "🔴 SELL"
+            reason = f"Strong Downtrend - 3 Red + EMA20 < EMA50 + RSI {round(rsi)}"
+            price_line = f"{price:.5f} er upore ba borabor thakle SELL"
+            confidence = 82
+            logic_type = "OTHER"
+        elif is_green and is_upore:
+            direction = "🟢 BUY"
+            reason = f"Weak Signal - SOBUJ + EMA er UPORE, RSI {round(rsi)}"
+            price_line = f"{price:.5f} er niche ba borabor thakle BUY"
+            confidence = 60
+            logic_type = "WEAK"
+        elif is_red and is_niche:
+            direction = "🔴 SELL"
+            reason = f"Weak Signal - LAL + EMA er NICHE, RSI {round(rsi)}"
+            price_line = f"{price:.5f} er upore ba borabor thakle SELL"
+            confidence = 60
+            logic_type = "WEAK"
+        # === FINAL FALLBACK - EKHON AR KHALI HATE FIRBE NA ===
+        elif is_upore:
+            direction = "🟢 BUY"
+            reason = f"Sideways Market - Candle ulta palta, kintu Price EMA er UPORE, tai BUY - RSI {round(rsi)}"
+            price_line = f"{price:.5f} er niche ba borabor thakle BUY"
+            confidence = 55
+            logic_type = "FALLBACK"
+        elif is_niche:
+            direction = "🔴 SELL"
+            reason = f"Sideways Market - Candle ulta palta, kintu Price EMA er NICHE, tai SELL - RSI {round(rsi)}"
+            price_line = f"{price:.5f} er upore ba borabor thakle SELL"
+            confidence = 55
+            logic_type = "FALLBACK"
+        elif is_green:
+            direction = "🟢 BUY"
+            reason = f"Last Candle SOBUJ - RSI {round(rsi)} - Sabdhan"
+            price_line = f"{price:.5f} er niche ba borabor thakle BUY"
+            confidence = 55
+            logic_type = "FALLBACK"
         else:
-            # Logic A: Oversold Reversal
-            if rsi < 30 and is_green and price > float(prev['Close']):
-                direction = "🟢 BUY"
-                reason = f"Rule er baire - Oversold Reversal - RSI {round(rsi)} < 30"
-                price_line = f"{price:.5f} er niche ba borabor thakle BUY"
-                confidence = 78
-                logic_type = "OTHER"
-            elif rsi > 70 and is_red and price < float(prev['Close']):
-                direction = "🔴 SELL"
-                reason = f"Rule er baire - Overbought Reversal - RSI {round(rsi)} > 70"
-                price_line = f"{price:.5f} er upore ba borabor thakle SELL"
-                confidence = 78
-                logic_type = "OTHER"
-            elif is_green and is_upore and float(prev['Close']) > float(prev['Open']) and float(prev2['Close']) > float(prev2['Open']) and ema > ema50:
-                direction = "🟢 BUY"
-                reason = f"Rule er baire - Strong Uptrend - 3 Green + EMA20 > EMA50 + RSI {round(rsi)}"
-                price_line = f"{price:.5f} er niche ba borabor thakle BUY"
-                confidence = 82
-                logic_type = "OTHER"
-            elif is_red and is_niche and float(prev['Close']) < float(prev['Open']) and float(prev2['Close']) < float(prev2['Open']) and ema < ema50:
-                direction = "🔴 SELL"
-                reason = f"Rule er baire - Strong Downtrend - 3 Red + EMA20 < EMA50 + RSI {round(rsi)}"
-                price_line = f"{price:.5f} er upore ba borabor thakle SELL"
-                confidence = 82
-                logic_type = "OTHER"
-            elif is_green and price > ema and float(prev['Close']) < float(prev['EMA20']):
-                direction = "🟢 BUY"
-                reason = f"Rule er baire - EMA20 Breakout Up + RSI {round(rsi)}"
-                price_line = f"{price:.5f} er niche ba borabor thakle BUY"
-                confidence = 72
-                logic_type = "OTHER"
-            elif is_red and price < ema and float(prev['Close']) > float(prev['EMA20']):
-                direction = "🔴 SELL"
-                reason = f"Rule er baire - EMA20 Breakout Down + RSI {round(rsi)}"
-                price_line = f"{price:.5f} er upore ba borabor thakle SELL"
-                confidence = 72
-                logic_type = "OTHER"
-            # === NEW: LAST OPTION - WEAK SIGNAL, KHALI THAKBE NA ===
-            elif is_green and is_upore:
-                direction = "🟢 BUY"
-                reason = f"Weak Signal - SOBUJ + EMA er UPORE, RSI {round(rsi)} - Sabdhan"
-                price_line = f"{price:.5f} er niche ba borabor thakle BUY"
-                confidence = 60
-                logic_type = "WEAK"
-            elif is_red and is_niche:
-                direction = "🔴 SELL"
-                reason = f"Weak Signal - LAL + EMA er NICHE, RSI {round(rsi)} - Sabdhan"
-                price_line = f"{price:.5f} er upore ba borabor thakle SELL"
-                confidence = 60
-                logic_type = "WEAK"
-            else:
-                continue
-
-        if confidence < 60:
-            continue
+            direction = "🔴 SELL"
+            reason = f"Last Candle LAL - RSI {round(rsi)} - Sabdhan"
+            price_line = f"{price:.5f} er upore ba borabor thakle SELL"
+            confidence = 55
+            logic_type = "FALLBACK"
 
         if confidence >= 70:
             power = f"🔥 STRONG SIGNAL - {confidence}% Kaj Korar Chance"
-        else:
+        elif confidence >= 60:
             power = f"⚠️ WEAK SIGNAL - {confidence}% - Sabdhan, Chaile Skip Koro"
+        else:
+            power = f"⚠️ LOW SIGNAL - {confidence}% - Sideways Market, Risk beshi, Skip kora valo"
 
         tag = "✋ TUMI CHAISO - MANUAL" if manual else "🤖 AUTO - RULE MILSE"
         msg = f"""🚨 {tag}
@@ -181,7 +187,7 @@ def check_all_markets(manual=False):
         break
     
     if manual and not found_any:
-        send_telegram("❌ Ekhon kono Rules miltese na vai. 5 min por abar try koro ba Auto er jonno wait koro.")
+        send_telegram("❌ Yahoo theke dam ante partesi na, 1 min por abar try koro.")
 
 def check_results():
     global today_win, today_loss
@@ -249,8 +255,8 @@ def check_telegram_commands():
     except Exception as e:
         print(f"Telegram Poll Error: {e}")
 
-send_telegram("🤖 BOT UPDATED - LOOSE MODE!\n✅ 1. Tumi 'signal' likhle Instant Signal\n✅ 2. Auto proti 5 min e check\n✅ Rule ektu loose - Ekhon beshi signal asbe")
-print("BOT Started - LOOSE MODE...")
+send_telegram("🤖 BOT UPDATED - ALWAYS SIGNAL MODE!\n✅ Ekhon ar 'Rules miltese na' asbe na\n✅ Rule na mille Sideways Signal dibe")
+print("BOT Started - ALWAYS SIGNAL MODE...")
 while True:
     try:
         now_ts = time.time()
