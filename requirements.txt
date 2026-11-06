@@ -1,5 +1,5 @@
 Flask==3.0.0
 tradingview-ta==3.3.0
-tvdatafeed==2.1.0
+tvDatafeed==2.1.0
 pandas==2.2.0
 requests==2.31.0
