@@ -21,11 +21,6 @@ AMOUNT = 3
 PAIRS = {
     "EUR/USD": "EURUSD=X",
     "GBP/USD": "GBPUSD=X",
-    "USD/JPY": "USDJPY=X",
-    "AUD/USD": "AUDUSD=X",
-    "USD/CAD": "USDCAD=X",
-    "EUR/GBP": "EURGBP=X",
-    "GBP/JPY": "GBPJPY=X",
 }
 
 sent_signals = {}
