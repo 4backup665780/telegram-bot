@@ -62,7 +62,6 @@ def get_market_data(symbol):
 def check_all_markets(manual=False):
     now = datetime.now()
     next_candle_time = (now + timedelta(minutes=1)).strftime("%H:%M")
-    # Auto te ek pair er jonno ekbar e signal, manual e abar check korbe
     if not manual and next_candle_time in sent_signals:
         return
     found_any = False
@@ -89,61 +88,74 @@ def check_all_markets(manual=False):
         confidence = 0
         logic_type = ""
 
-        # === RULE 1 & 2 - MAIN RULE ===
-        if is_green and is_upore and 40 <= rsi <= 70:
+        # === RULE 1 & 2 - LOOSE VERSION ===
+        if is_green and is_upore and 35 <= rsi <= 75:
             direction = "🟢 BUY"
             reason = f"Rule 1 Milse - SOBUJ + UPORE + RSI {round(rsi)}"
             price_line = f"{price:.5f} er niche ba borabor thakle BUY"
-            confidence = 75 if 50 <= rsi <= 60 else 65
+            confidence = 75 if 50 <= rsi <= 60 else 68
             logic_type = "RULE"
-        elif is_red and is_niche and 30 <= rsi <= 60:
+        elif is_red and is_niche and 25 <= rsi <= 65:
             direction = "🔴 SELL"
             reason = f"Rule 2 Milse - LAL + NICHE + RSI {round(rsi)}"
             price_line = f"{price:.5f} er upore ba borabor thakle SELL"
-            confidence = 75 if 40 <= rsi <= 50 else 65
+            confidence = 75 if 40 <= rsi <= 50 else 68
             logic_type = "RULE"
         else:
             # Logic A: Oversold Reversal
             if rsi < 30 and is_green and price > float(prev['Close']):
                 direction = "🟢 BUY"
-                reason = f"Rule er baire - Oversold Reversal - RSI {round(rsi)} < 30, U-turn chance beshi"
+                reason = f"Rule er baire - Oversold Reversal - RSI {round(rsi)} < 30"
                 price_line = f"{price:.5f} er niche ba borabor thakle BUY"
                 confidence = 78
                 logic_type = "OTHER"
             elif rsi > 70 and is_red and price < float(prev['Close']):
                 direction = "🔴 SELL"
-                reason = f"Rule er baire - Overbought Reversal - RSI {round(rsi)} > 70, Down chance beshi"
+                reason = f"Rule er baire - Overbought Reversal - RSI {round(rsi)} > 70"
                 price_line = f"{price:.5f} er upore ba borabor thakle SELL"
                 confidence = 78
                 logic_type = "OTHER"
             elif is_green and is_upore and float(prev['Close']) > float(prev['Open']) and float(prev2['Close']) > float(prev2['Open']) and ema > ema50:
                 direction = "🟢 BUY"
-                reason = f"Rule er baire - Strong Uptrend Continue - 3 Green + EMA20 > EMA50 + RSI {round(rsi)}"
+                reason = f"Rule er baire - Strong Uptrend - 3 Green + EMA20 > EMA50 + RSI {round(rsi)}"
                 price_line = f"{price:.5f} er niche ba borabor thakle BUY"
                 confidence = 82
                 logic_type = "OTHER"
             elif is_red and is_niche and float(prev['Close']) < float(prev['Open']) and float(prev2['Close']) < float(prev2['Open']) and ema < ema50:
                 direction = "🔴 SELL"
-                reason = f"Rule er baire - Strong Downtrend Continue - 3 Red + EMA20 < EMA50 + RSI {round(rsi)}"
+                reason = f"Rule er baire - Strong Downtrend - 3 Red + EMA20 < EMA50 + RSI {round(rsi)}"
                 price_line = f"{price:.5f} er upore ba borabor thakle SELL"
                 confidence = 82
                 logic_type = "OTHER"
             elif is_green and price > ema and float(prev['Close']) < float(prev['EMA20']):
                 direction = "🟢 BUY"
-                reason = f"Rule er baire - EMA20 Breakout Up - Price EMA cross korse + RSI {round(rsi)}"
+                reason = f"Rule er baire - EMA20 Breakout Up + RSI {round(rsi)}"
                 price_line = f"{price:.5f} er niche ba borabor thakle BUY"
                 confidence = 72
                 logic_type = "OTHER"
             elif is_red and price < ema and float(prev['Close']) > float(prev['EMA20']):
                 direction = "🔴 SELL"
-                reason = f"Rule er baire - EMA20 Breakout Down - Price EMA cross korse + RSI {round(rsi)}"
+                reason = f"Rule er baire - EMA20 Breakout Down + RSI {round(rsi)}"
                 price_line = f"{price:.5f} er upore ba borabor thakle SELL"
                 confidence = 72
                 logic_type = "OTHER"
+            # === NEW: LAST OPTION - WEAK SIGNAL, KHALI THAKBE NA ===
+            elif is_green and is_upore:
+                direction = "🟢 BUY"
+                reason = f"Weak Signal - SOBUJ + EMA er UPORE, RSI {round(rsi)} - Sabdhan"
+                price_line = f"{price:.5f} er niche ba borabor thakle BUY"
+                confidence = 60
+                logic_type = "WEAK"
+            elif is_red and is_niche:
+                direction = "🔴 SELL"
+                reason = f"Weak Signal - LAL + EMA er NICHE, RSI {round(rsi)} - Sabdhan"
+                price_line = f"{price:.5f} er upore ba borabor thakle SELL"
+                confidence = 60
+                logic_type = "WEAK"
             else:
                 continue
 
-        if confidence < 65:
+        if confidence < 60:
             continue
 
         if confidence >= 70:
@@ -237,16 +249,14 @@ def check_telegram_commands():
     except Exception as e:
         print(f"Telegram Poll Error: {e}")
 
-send_telegram("🤖 BOT UPDATED - FINAL MODE!\n✅ 1. Tumi 'signal' likhle Instant Signal\n✅ 2. Auto proti 5 min e check - Rule mille Auto pathabe\n✅ 70-90% Strong Signal Auto\n✅ 429 ar khabe na")
-print("BOT Started - FINAL MODE...")
+send_telegram("🤖 BOT UPDATED - LOOSE MODE!\n✅ 1. Tumi 'signal' likhle Instant Signal\n✅ 2. Auto proti 5 min e check\n✅ Rule ektu loose - Ekhon beshi signal asbe")
+print("BOT Started - LOOSE MODE...")
 while True:
     try:
         now_ts = time.time()
-        # MODE 2: Auto - proti 5 min e 1 bar
         if now_ts - last_auto_check >= 300:
             last_auto_check = now_ts
             check_all_markets(manual=False)
-        # MODE 1: Manual - Telegram e 'signal' likhle
         check_telegram_commands()
         check_results()
         time.sleep(5)
