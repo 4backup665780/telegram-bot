@@ -1,4 +1,5 @@
-requests
-yfinance
-pandas
-Flask
+Flask==3.0.0
+tradingview-ta==3.3.0
+yfinance==0.2.38
+pandas==2.2.0
+requests==2.31.0
