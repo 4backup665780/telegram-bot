@@ -8,7 +8,6 @@ threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get(
 
 import time
 import requests
-import pandas as pd
 from datetime import datetime, timedelta, timezone
 from tradingview_ta import TA_Handler, Interval as TA_Interval
 
@@ -53,7 +52,6 @@ def get_tradingview_data(tv_symbol):
         return None
 
 def get_sr_and_last_candle(tv_symbol, tv_exchange):
-    # Support Resistance + Last Candel Color - TradingView History theke
     try:
         now_ts = int(time.time())
         from_ts = now_ts - 35*60
@@ -74,10 +72,9 @@ def get_sr_and_last_candle(tv_symbol, tv_exchange):
         use_lows = lows[-31:-1]
         support = min(use_lows)
         resistance = max(use_highs)
-        # Last Closed Candel - Running ta bad diye ager ta
         last_close = closes[-2]
         last_open = opens[-2]
-        last_green = last_close > last_open  # SOBUJ True, LAL False
+        last_green = last_close > last_open
         last_red = not last_green
         return {
             "support": float(support),
@@ -120,21 +117,18 @@ def check_all_markets(manual=False):
         last_green = sr["last_green"]
         last_red = sr["last_red"]
 
-        # OP-1 Terms
         is_sobuj = last_green
         is_lal = last_red
         is_upore = price > ema20
         is_niche = price < ema20
 
-        # SR Terms
         dist_support_pct = abs(price - support) / price * 100 if price != 0 else 999
         dist_resistance_pct = abs(price - resistance) / price * 100 if price != 0 else 999
-        near_support = dist_support_pct <= 0.12 or price < support  # Support er kache ba venge niche
-        near_resistance = dist_resistance_pct <= 0.12 or price > resistance  # Resistance er kache ba venge upore
+        near_support = dist_support_pct <= 0.12 or price < support
+        near_resistance = dist_resistance_pct <= 0.12 or price > resistance
         breakout_up = price > resistance
         breakdown_down = price < support
 
-        # Safety Flat Check
         min_range = 0.0004 if "JPY" not in pair_name else 0.04
         if sr["range_pips"] < min_range:
             if manual:
@@ -174,7 +168,7 @@ def check_all_markets(manual=False):
                 send_telegram(f"⏳ {pair_name} - Rule 4: SOBUJ + NICHE + RSI {round(rsi)} = WAIT\nPrice {price:.5f} | EMA {ema20:.5f} | Support {support:.5f} | Resistance {resistance:.5f}")
             continue
 
-        # ===== OP-1 Milse kintu SR Milenai = WAIT (Middle Zone) =====
+        # ===== OP-1 Milse kintu SR Milenai = WAIT =====
         elif (is_sobuj and is_upore and 40 <= rsi <= 70) or (is_lal and is_niche and 30 <= rsi <= 60):
             if manual:
                 send_telegram(f"⏳ {pair_name} - OP-1 Milse kintu SR Milenai = WAIT\nLast Candel {'SOBUJ' if is_sobuj else 'LAL'} + {'UPORE' if is_upore else 'NICHE'} + RSI {round(rsi)}\nPrice {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f} | Middle Zone e ache")
