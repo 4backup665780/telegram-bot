@@ -3,7 +3,7 @@ import threading, os
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "BOT IS RUNNING - 100% TRADINGVIEW NO YAHOO NO TVDATAFEED"
+    return "BOT RUNNING - OP-1 + SUPPORT RESISTANCE"
 threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))).start()
 
 import time
@@ -20,7 +20,6 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 AMOUNT = 3
 
-# 5 PAIRS - 100% TradingView
 PAIRS = {
     "EUR/USD": {"tv_symbol": "EURUSD", "tv_exchange": "OANDA"},
     "GBP/USD": {"tv_symbol": "GBPUSD", "tv_exchange": "OANDA"},
@@ -44,58 +43,55 @@ def send_telegram(msg):
         print(f"Telegram Error: {e}")
 
 def get_tradingview_data(tv_symbol):
-    # RSI, EMA, Price - TradingView TA theke
     try:
-        handler = TA_Handler(
-            symbol=tv_symbol,
-            screener="forex",
-            exchange="OANDA",
-            interval=TA_Interval.INTERVAL_1_MINUTE
-        )
+        handler = TA_Handler(symbol=tv_symbol, screener="forex", exchange="OANDA", interval=TA_Interval.INTERVAL_1_MINUTE)
         analysis = handler.get_analysis()
         ind = analysis.indicators
-        return {
-            "price": float(ind["close"]),
-            "open": float(ind["open"]),
-            "rsi": float(ind["RSI"]),
-            "ema20": float(ind["EMA20"]),
-        }
+        return {"price": float(ind["close"]), "open": float(ind["open"]), "rsi": float(ind["RSI"]), "ema20": float(ind["EMA20"])}
     except Exception as e:
-        print(f"TradingView TA Error {tv_symbol}: {e}")
+        print(f"TA Error {tv_symbol}: {e}")
         return None
 
-def get_candle_count_tradingview(tv_symbol, tv_exchange):
-    # Last 10 Candel Count - TradingView History API theke, Yahoo na, tvDatafeed na
+def get_sr_and_last_candle(tv_symbol, tv_exchange):
+    # Support Resistance + Last Candel Color - TradingView History theke
     try:
         now_ts = int(time.time())
-        from_ts = now_ts - 20*60
+        from_ts = now_ts - 35*60
         symbol_full = f"{tv_exchange}:{tv_symbol}"
         url = f"https://udf-proxy.tradingview.com/history?symbol={symbol_full}&resolution=1&from={from_ts}&to={now_ts}"
         headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get(url, headers=headers, timeout=10)
         data = r.json()
         if data.get("s") != "ok" or "c" not in data:
-            print(f"TV History No Data {tv_symbol}: {data}")
-            return 0, 0, True
+            return None
+        highs = data["h"]
+        lows = data["l"]
         closes = data["c"]
         opens = data["o"]
-        if len(closes) < 11:
-            return 0, 0, True
-        # Last 10 closed candel (running ta bad diye)
-        last_10_o = opens[-11:-1]
-        last_10_c = closes[-11:-1]
-        green = 0
-        red = 0
-        for o, c in zip(last_10_o, last_10_c):
-            if c > o:
-                green += 1
-            else:
-                red += 1
-        last_green = closes[-2] > opens[-2]
-        return green, red, last_green
+        if len(closes) < 25:
+            return None
+        use_highs = highs[-31:-1]
+        use_lows = lows[-31:-1]
+        support = min(use_lows)
+        resistance = max(use_highs)
+        # Last Closed Candel - Running ta bad diye ager ta
+        last_close = closes[-2]
+        last_open = opens[-2]
+        last_green = last_close > last_open  # SOBUJ True, LAL False
+        last_red = not last_green
+        return {
+            "support": float(support),
+            "resistance": float(resistance),
+            "middle": float((support + resistance)/2),
+            "range_pips": float(resistance - support),
+            "last_green": last_green,
+            "last_red": last_red,
+            "last_close": float(last_close),
+            "last_open": float(last_open),
+        }
     except Exception as e:
-        print(f"TradingView History Error {tv_symbol}: {e}")
-        return 0, 0, True
+        print(f"SR Error {tv_symbol}: {e}")
+        return None
 
 def check_all_markets(manual=False):
     global last_signal_minute
@@ -110,55 +106,87 @@ def check_all_markets(manual=False):
         tv = get_tradingview_data(symbols["tv_symbol"])
         if tv is None:
             continue
+        sr = get_sr_and_last_candle(symbols["tv_symbol"], symbols["tv_exchange"])
+        if sr is None:
+            if manual:
+                send_telegram(f"❌ {pair_name} - Data Pawa Jay Nai")
+            continue
+
         price = tv["price"]
-        ema = tv["ema20"]
+        ema20 = tv["ema20"]
         rsi = tv["rsi"]
-        is_upore = price > ema
-        is_niche = price < ema
-        green_count, red_count, last_green = get_candle_count_tradingview(symbols["tv_symbol"], symbols["tv_exchange"])
-        last_red = not last_green
+        support = sr["support"]
+        resistance = sr["resistance"]
+        last_green = sr["last_green"]
+        last_red = sr["last_red"]
+
+        # OP-1 Terms
+        is_sobuj = last_green
+        is_lal = last_red
+        is_upore = price > ema20
+        is_niche = price < ema20
+
+        # SR Terms
+        dist_support_pct = abs(price - support) / price * 100 if price != 0 else 999
+        dist_resistance_pct = abs(price - resistance) / price * 100 if price != 0 else 999
+        near_support = dist_support_pct <= 0.12 or price < support  # Support er kache ba venge niche
+        near_resistance = dist_resistance_pct <= 0.12 or price > resistance  # Resistance er kache ba venge upore
+        breakout_up = price > resistance
+        breakdown_down = price < support
+
+        # Safety Flat Check
+        min_range = 0.0004 if "JPY" not in pair_name else 0.04
+        if sr["range_pips"] < min_range:
+            if manual:
+                send_telegram(f"⏳ {pair_name} - FLAT MARKET = WAIT\nSupport {support:.5f} | Resistance {resistance:.5f}")
+            continue
+
         direction = None
         reason = ""
         price_line = ""
         rule_name = ""
-        # PRIORITY 1: OP-1 RULE 1 BUY
-        if green_count >= 6 and is_upore and 40 <= rsi <= 70:
+
+        # ===== RULE 1: SOBUJ + UPORE + RSI 40-70 + SR = BUY =====
+        if is_sobuj and is_upore and 40 <= rsi <= 70 and (near_support or breakout_up):
             direction = "🟢 BUY"
-            rule_name = "OP-1 Rule 1 [TradingView]"
-            reason = f"OP-1: TradingView 10 Candel e {green_count} SOBUJ + UPORE (EMA {ema:.5f}) + RSI {round(rsi)} (40-70)"
-            price_line = f"TradingView Price {price:.5f} - Quotex e ei dam er kachakachi dekhle BUY"
-        # PRIORITY 2: OP-1 RULE 2 SELL
-        elif red_count >= 6 and is_niche and 30 <= rsi <= 60:
+            rule_name = "Rule 1: SOBUJ + UPORE + RSI 40-70 + SR"
+            sr_txt = "Breakout Above Resistance" if breakout_up else f"Support {support:.5f} er kache Bounce"
+            reason = f"Rule 1: Last Candel SOBUJ + Price EMA20 ({ema20:.5f}) er UPORE + RSI {round(rsi)} (40-70) + SR: {sr_txt}"
+            price_line = f"Price {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f}"
+
+        # ===== RULE 2: LAL + NICHE + RSI 30-60 + SR = SELL =====
+        elif is_lal and is_niche and 30 <= rsi <= 60 and (near_resistance or breakdown_down):
             direction = "🔴 SELL"
-            rule_name = "OP-1 Rule 2 [TradingView]"
-            reason = f"OP-1: TradingView 10 Candel e {red_count} LAL + NICHE (EMA {ema:.5f}) + RSI {round(rsi)} (30-60)"
-            price_line = f"TradingView Price {price:.5f} - Quotex e ei dam er kachakachi dekhle SELL"
-        # PRIORITY 3: EXTRA STRONG
-        elif green_count >= 9 and is_upore:
-            direction = "🟢 BUY"
-            rule_name = "EXTRA STRONG [TradingView]"
-            reason = f"EXTRA STRONG: TradingView 10 Candel e {green_count}/10 SOBUJ + UPORE + RSI {round(rsi)}"
-            price_line = f"TradingView Price {price:.5f} - Quotex e ei dam er kachakachi dekhle BUY"
-        elif red_count >= 9 and is_niche:
-            direction = "🔴 SELL"
-            rule_name = "EXTRA STRONG [TradingView]"
-            reason = f"EXTRA STRONG: TradingView 10 Candel e {red_count}/10 LAL + NICHE + RSI {round(rsi)}"
-            price_line = f"TradingView Price {price:.5f} - Quotex e ei dam er kachakachi dekhle SELL"
-        # PRIORITY 4: WAIT
-        elif last_red and is_upore and 40 <= rsi <= 70:
+            rule_name = "Rule 2: LAL + NICHE + RSI 60-30 + SR"
+            sr_txt = "Breakdown Below Support" if breakdown_down else f"Resistance {resistance:.5f} er kache Rejection"
+            reason = f"Rule 2: Last Candel LAL + Price EMA20 ({ema20:.5f}) er NICHE + RSI {round(rsi)} (30-60) + SR: {sr_txt}"
+            price_line = f"Price {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f}"
+
+        # ===== RULE 3: LAL + UPORE + RSI 40-70 = WAIT =====
+        elif is_lal and is_upore and 40 <= rsi <= 70:
             if manual:
-                send_telegram(f"⏳ {pair_name} - Rule 3: LAL + UPORE = WAIT [TradingView RSI {round(rsi)}]")
+                send_telegram(f"⏳ {pair_name} - Rule 3: LAL + UPORE + RSI {round(rsi)} = WAIT\nPrice {price:.5f} | EMA {ema20:.5f} | Support {support:.5f} | Resistance {resistance:.5f}")
             continue
-        elif last_green and is_niche and 30 <= rsi <= 60:
+
+        # ===== RULE 4: SOBUJ + NICHE + RSI 30-60 = WAIT =====
+        elif is_sobuj and is_niche and 30 <= rsi <= 60:
             if manual:
-                send_telegram(f"⏳ {pair_name} - Rule 4: SOBUJ + NICHE = WAIT [TradingView RSI {round(rsi)}]")
+                send_telegram(f"⏳ {pair_name} - Rule 4: SOBUJ + NICHE + RSI {round(rsi)} = WAIT\nPrice {price:.5f} | EMA {ema20:.5f} | Support {support:.5f} | Resistance {resistance:.5f}")
             continue
+
+        # ===== OP-1 Milse kintu SR Milenai = WAIT (Middle Zone) =====
+        elif (is_sobuj and is_upore and 40 <= rsi <= 70) or (is_lal and is_niche and 30 <= rsi <= 60):
+            if manual:
+                send_telegram(f"⏳ {pair_name} - OP-1 Milse kintu SR Milenai = WAIT\nLast Candel {'SOBUJ' if is_sobuj else 'LAL'} + {'UPORE' if is_upore else 'NICHE'} + RSI {round(rsi)}\nPrice {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f} | Middle Zone e ache")
+            continue
+
         else:
             if manual:
-                send_telegram(f"❌ {pair_name} - Kono Rule Milenai [TradingView]\n10 Candel: {green_count} SOBUJ / {red_count} LAL\nRSI {round(rsi)} | Price {price:.5f} | EMA {ema:.5f}")
+                send_telegram(f"❌ {pair_name} - Kono Rule Milenai\nLast Candel {'SOBUJ' if is_sobuj else 'LAL'} | {'UPORE' if is_upore else 'NICHE'} | RSI {round(rsi)}\nPrice {price:.5f} | EMA {ema20:.5f}\nSupport {support:.5f} | Resistance {resistance:.5f}")
             continue
+
         tag = "✋ MANUAL" if manual else "🤖 AUTO"
-        msg = f"""🚨 {tag} - 100% TradingView Mode
+        msg = f"""🚨 {tag} - OP-1 + SR MODE
 📊 Asset: {pair_name}
 ⏱️ Expiry: M1
 🎯 Direction: {direction}
@@ -168,9 +196,9 @@ def check_all_markets(manual=False):
 ⚠️ Safety: 0-10s Dekhbo, 10-20s Trade, 20s+ NO TRADE
 ✅ Reason: {reason}
 💰 Amount: ${AMOUNT}
-📌 Note: 100% TradingView Data, Yahoo Nai"""
+📌 Note: OP-1 (SOBUJ/LAL + UPORE/NICHE + RSI) + Support/Resistance Double Confirm"""
         send_telegram(msg)
-        print(f"Signal TV: {pair_name} {direction} for {next_candle_time} - {rule_name}")
+        print(f"Signal OP1+SR: {pair_name} {direction} for {next_candle_time} - {rule_name}")
         sent_signals[next_candle_time] = {"pair": pair_name, "direction": direction, "tv_symbol": symbols["tv_symbol"], "entry_price": price, "entry_time": next_candle_time}
         last_signal_minute = next_candle_time
         return
@@ -209,7 +237,7 @@ def check_results():
                     extra = "\n⚠️ Rule 6: 2 Loss = STOP"
                 if today_win >= 3:
                     extra = "\n⚠️ Rule 6: 3 Win = STOP"
-                msg = f"""📢 RESULT - {pred['entry_time']} CANDLE [TradingView]
+                msg = f"""📢 RESULT - {pred['entry_time']} CANDLE [OP-1 + SR]
 📊 Asset: {pred['pair']}
 🎯 Direction: {pred['direction']}
 💰 Entry: {entry:.5f} -> Close: {close_price:.5f} (TradingView)
@@ -235,23 +263,23 @@ def check_telegram_commands():
             msg_data = upd.get("message", {})
             text = (msg_data.get("text") or "").strip().lower()
             if text == "signal":
-                send_telegram("🔍 100% TradingView theke OP-1 + Extra Strong Analysis kortesi...")
+                send_telegram("🔍 OP-1 + Support/Resistance Analysis kortesi... 5 Pair Check kortesi")
                 check_all_markets(manual=True)
             elif text == "win":
                 today_win += 1
-                send_telegram(f"✅ WIN Record korsi (Manual Correction)\n📈 Total Today: {today_win} Win - {today_loss} Loss")
+                send_telegram(f"✅ WIN Record korsi\n📈 Total Today: {today_win} Win - {today_loss} Loss")
                 if today_win >= 3:
                     send_telegram("⚠️ Rule 6: 3 Win = STOP")
             elif text == "loss":
                 today_loss += 1
-                send_telegram(f"❌ LOSS Record korsi (Manual Correction)\n📈 Total Today: {today_win} Win - {today_loss} Loss")
+                send_telegram(f"❌ LOSS Record korsi\n📈 Total Today: {today_win} Win - {today_loss} Loss")
                 if today_loss >= 2:
                     send_telegram("⚠️ Rule 6: 2 Loss = STOP")
     except Exception as e:
         print(f"Telegram Poll Error: {e}")
 
-send_telegram("🤖 BOT UPDATED - 100% TRADINGVIEW NO YAHOO\n✅ RSI/EMA + Candle Count sob TradingView theke\n✅ EUR/USD, GBP/USD, USD/JPY, AUD/USD, USD/CAD")
-print("BOT Started - 100% TRADINGVIEW NO YAHOO")
+send_telegram("🤖 BOT UPDATED - OP-1 + SR MODE\n✅ Rule 1: SOBUJ + UPORE + RSI 40-70 = BUY\n✅ Rule 2: LAL + NICHE + RSI 60-30 = SELL\n✅ Rule 3: LAL + UPORE = WAIT\n✅ Rule 4: SOBUJ + NICHE = WAIT\n✅ + Support/Resistance Double Confirm")
+print("BOT Started - OP-1 + SR")
 while True:
     try:
         now = now_bd()
