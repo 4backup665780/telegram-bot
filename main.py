@@ -3,7 +3,7 @@ import threading, os
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "BOT RUNNING - OP-1 + SR FALLBACK FIXED"
+    return "BOT RUNNING - OP-1 + SR FALLBACK + HEARTBEAT"
 threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))).start()
 
 import time
@@ -33,6 +33,8 @@ today_loss = 0
 last_auto_check = 0
 last_update_id = 0
 last_signal_minute = ""
+last_heartbeat = 0
+last_auto_wait_msg = 0
 
 def send_telegram(msg):
     try:
@@ -61,7 +63,7 @@ def get_sr_and_last_candle(tv_symbol, tv_exchange):
         r = requests.get(url, headers=headers, timeout=10)
         data = r.json()
         if data.get("s") != "ok" or "c" not in data:
-            print(f"SR No Data {tv_symbol}: {data}")
+            print(f"SR No Data {tv_symbol}")
             return None
         highs = data["h"]
         lows = data["l"]
@@ -91,7 +93,7 @@ def get_sr_and_last_candle(tv_symbol, tv_exchange):
         return None
 
 def check_all_markets(manual=False):
-    global last_signal_minute
+    global last_signal_minute, last_auto_wait_msg
     now = now_bd()
     entry_dt = now + timedelta(minutes=1)
     next_candle_time = entry_dt.strftime("%H:%M")
@@ -109,7 +111,7 @@ def check_all_markets(manual=False):
     for pair_name, symbols in PAIRS.items():
         try:
             checked += 1
-            print(f"Checking {pair_name}...")
+            print(f"Checking {pair_name} at {now.strftime('%H:%M:%S')} manual={manual}")
             tv = get_tradingview_data(symbols["tv_symbol"])
             if tv is None:
                 failed_tv += 1
@@ -158,7 +160,7 @@ def check_all_markets(manual=False):
             rule_name = ""
             signal_type = ""
 
-            # STEP 1: OP-1
+            # STEP 1: OP-1 - STRONG
             if is_sobuj and is_upore and 40 <= rsi <= 70 and (near_support or breakout_up):
                 direction = "🟢 BUY"
                 rule_name = "Rule 1: SOBUJ + UPORE + RSI 40-70 + SR"
@@ -173,7 +175,7 @@ def check_all_markets(manual=False):
                 sr_txt = "Breakdown Below Support" if breakdown_down else f"Resistance {resistance:.5f} er kache Rejection"
                 reason = f"OP-1 Rule 2: Last Candel LAL + Price EMA20 ({ema20:.5f}) er NICHE + RSI {round(rsi)} (30-60) + SR: {sr_txt}"
                 price_line = f"Price {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f}"
-            # STEP 2: SR FALLBACK
+            # STEP 2: SR FALLBACK - OP-1 na mille
             elif sr_near_support and 25 <= rsi <= 55:
                 direction = "🟢 BUY"
                 rule_name = "SR-1: Support Bounce"
@@ -226,10 +228,13 @@ def check_all_markets(manual=False):
                 send_telegram(f"❌ {pair_name} - Error: {e}")
             continue
 
-    # LOOP SES - JODI KICHU NA MILE
     if manual:
         elapsed = round(time.time() - start_time, 1)
-        send_telegram(f"🏁 CHECK SES - {elapsed}s lagse\nChecked: {checked} Pair | TV Fail: {failed_tv} | SR Fail: {failed_sr}\nWAIT List: {', '.join(wait_list) if wait_list else 'Nai'}\nNote: Jodi TV Fail beshi hoy, TradingView Rate Limit hoise, 2 min por abar 'signal' likho")
+        send_telegram(f"🏁 CHECK SES - {elapsed}s lagse\nChecked: {checked} Pair | TV Fail: {failed_tv} | SR Fail: {failed_sr}\nWAIT List: {', '.join(wait_list) if wait_list else 'Nai'}")
+    else:
+        if time.time() - last_auto_wait_msg >= 600:
+            last_auto_wait_msg = time.time()
+            send_telegram(f"⏳ AUTO CHECK - {now.strftime('%H:%M:%S')} - Signal milenai, WAIT cholche...\nChecked: {checked} Pair | TV Fail: {failed_tv} | SR Fail: {failed_sr}\nNext Signal er jonno wait koro")
 
 def check_results():
     global today_win, today_loss
@@ -305,15 +310,19 @@ def check_telegram_commands():
     except Exception as e:
         print(f"Telegram Poll Error: {e}")
 
-send_telegram("🤖 BOT UPDATED - OP-1 + SR FALLBACK FIXED\n✅ Step 1: OP-1 Rule 1/2 = STRONG Signal\n✅ Step 2: OP-1 na mille SR-1/2/3/4 = Candle to Candle Signal\n✅ Ekhon Bot Ar Chup Thakbe Na - Fail holeo janabe")
-print("BOT Started - OP-1 + SR Fallback Fixed")
+send_telegram("🤖 BOT RESTARTED - OP-1 + SR FALLBACK + HEARTBEAT\n✅ Step 1: OP-1 Rule 1/2 = STRONG Signal\n✅ Step 2: OP-1 na mille SR-1/2/3/4 = Candle to Candle Signal\n✅ Heartbeat: 10 min por por BOT ALIVE asbe\n✅ 12:26-1:09 Down chilo Render er jonno, ekhon abar Up")
+print("BOT Started - OP-1 + SR Fallback + Heartbeat")
 while True:
     try:
         now = now_bd()
-        if 25 <= now.second <= 30:
+        if 20 <= now.second <= 40:
             if time.time() - last_auto_check >= 50:
                 last_auto_check = time.time()
+                print(f"AUTO CHECK at {now.strftime('%H:%M:%S')}")
                 check_all_markets(manual=False)
+        if time.time() - last_heartbeat >= 600:
+            last_heartbeat = time.time()
+            send_telegram(f"💓 BOT ALIVE - {now.strftime('%H:%M:%S')} BD Time\n✅ Auto Check: Cholche proti minute 20-40s e\n✅ UptimeRobot: Up ache (Tumi agei lagaiso)\n⏳ Signal mille nijei pathabo")
         check_telegram_commands()
         check_results()
         time.sleep(1)
