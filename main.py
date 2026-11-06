@@ -9,8 +9,13 @@ import time
 import requests
 import yfinance as yf
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
+
+# --- BANGLADESH TIME FIX: UTC+6 ---
+BD_TZ = timezone(timedelta(hours=6))
+def now_bd():
+    return datetime.now(BD_TZ)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
@@ -59,7 +64,7 @@ def get_market_data(symbol):
         return None
 
 def check_all_markets(manual=False):
-    now = datetime.now()
+    now = now_bd()
     next_candle_time = (now + timedelta(minutes=1)).strftime("%H:%M")
     if not manual and next_candle_time in sent_signals:
         return
@@ -87,7 +92,6 @@ def check_all_markets(manual=False):
         confidence = 0
         logic_type = ""
 
-        # === RULE 1 & 2 - LOOSE ===
         if is_green and is_upore and 35 <= rsi <= 75:
             direction = "🟢 BUY"
             reason = f"Rule 1 Milse - SOBUJ + UPORE + RSI {round(rsi)}"
@@ -136,7 +140,6 @@ def check_all_markets(manual=False):
             price_line = f"{price:.5f} er upore ba borabor thakle SELL"
             confidence = 60
             logic_type = "WEAK"
-        # === FINAL FALLBACK - EKHON AR KHALI HATE FIRBE NA ===
         elif is_upore:
             direction = "🟢 BUY"
             reason = f"Sideways Market - Candle ulta palta, kintu Price EMA er UPORE, tai BUY - RSI {round(rsi)}"
@@ -175,7 +178,7 @@ def check_all_markets(manual=False):
 ⏱️ Expiry: M1
 🎯 Direction: {direction}
 💰 Price: {price_line}
-🕒 Entry Time: {next_candle_time}
+🕒 Entry Time: {next_candle_time} (BD Time UTC+6)
 ⚠️ Safety: 0-10s Dekhbo, 10-20s Trade, 20s+ NO TRADE
 ✅ Reason: {reason}
 💰 Amount: ${AMOUNT} (1% of ${BALANCE})
@@ -191,13 +194,13 @@ def check_all_markets(manual=False):
 
 def check_results():
     global today_win, today_loss
-    now = datetime.now()
+    now = now_bd()
     if now.second < 2 or now.second > 10:
         return
     to_remove = []
     for candle_time, pred in list(sent_signals.items()):
         try:
-            candle_dt = datetime.strptime(candle_time, "%H:%M").replace(year=now.year, month=now.month, day=now.day)
+            candle_dt = datetime.strptime(candle_time, "%H:%M").replace(year=now.year, month=now.month, day=now.day, tzinfo=BD_TZ)
             diff = (now - candle_dt).total_seconds()
             if diff >= 60 and diff < 180:
                 df = get_market_data(pred["symbol"])
@@ -223,7 +226,7 @@ def check_results():
                     extra = "\n⚠️ Rule 6: Por por 2 Loss - STOP - Ajker moto sesh"
                 if today_win >= 3:
                     extra = "\n⚠️ Rule 6: 3 Win hoye gese - STOP - Profit niye ber hoye jao"
-                msg = f"""📢 RESULT - {pred['entry_time']} CANDLE
+                msg = f"""📢 RESULT - {pred['entry_time']} CANDLE (BD Time)
 📊 Asset: {pred['pair']}
 🎯 Direction: {pred['direction']}
 💰 Entry Price: {entry:.5f}
@@ -255,8 +258,8 @@ def check_telegram_commands():
     except Exception as e:
         print(f"Telegram Poll Error: {e}")
 
-send_telegram("🤖 BOT UPDATED - ALWAYS SIGNAL MODE!\n✅ Ekhon ar 'Rules miltese na' asbe na\n✅ Rule na mille Sideways Signal dibe")
-print("BOT Started - ALWAYS SIGNAL MODE...")
+send_telegram("🤖 BOT UPDATED - BD TIME UTC+6!\n✅ Ekhon sob time Bangladesh Time e asbe\n✅ Ekhon ar 'Rules miltese na' asbe na")
+print("BOT Started - BD TIME MODE...")
 while True:
     try:
         now_ts = time.time()
