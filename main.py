@@ -3,15 +3,14 @@ import threading, os
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "BOT IS RUNNING - 100% TRADINGVIEW NO YAHOO"
+    return "BOT IS RUNNING - 100% TRADINGVIEW NO YAHOO NO TVDATAFEED"
 threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))).start()
 
 import time
 import requests
 import pandas as pd
 from datetime import datetime, timedelta, timezone
-from tradingview_ta import TA_Handler, Interval as TA_Interval, Exchange
-from tvDatafeed import TvDatafeed, Interval as TV_Interval
+from tradingview_ta import TA_Handler, Interval as TA_Interval
 
 BD_TZ = timezone(timedelta(hours=6))
 def now_bd():
@@ -21,7 +20,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 AMOUNT = 3
 
-# 5 PAIRS - 100% TradingView, Yahoo Nai
+# 5 PAIRS - 100% TradingView
 PAIRS = {
     "EUR/USD": {"tv_symbol": "EURUSD", "tv_exchange": "OANDA"},
     "GBP/USD": {"tv_symbol": "GBPUSD", "tv_exchange": "OANDA"},
@@ -36,17 +35,6 @@ today_loss = 0
 last_auto_check = 0
 last_update_id = 0
 last_signal_minute = ""
-tv_feed = None
-
-def get_tv_feed():
-    global tv_feed
-    if tv_feed is None:
-        try:
-            tv_feed = TvDatafeed()
-        except Exception as e:
-            print(f"TvDatafeed Login Error: {e}")
-            tv_feed = None
-    return tv_feed
 
 def send_telegram(msg):
     try:
@@ -77,26 +65,33 @@ def get_tradingview_data(tv_symbol):
         return None
 
 def get_candle_count_tradingview(tv_symbol, tv_exchange):
-    # Last 10 Candel Count - TradingView History theke, Yahoo na
+    # Last 10 Candel Count - TradingView History API theke, Yahoo na, tvDatafeed na
     try:
-        feed = get_tv_feed()
-        if feed is None:
+        now_ts = int(time.time())
+        from_ts = now_ts - 20*60
+        symbol_full = f"{tv_exchange}:{tv_symbol}"
+        url = f"https://udf-proxy.tradingview.com/history?symbol={symbol_full}&resolution=1&from={from_ts}&to={now_ts}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=10)
+        data = r.json()
+        if data.get("s") != "ok" or "c" not in data:
+            print(f"TV History No Data {tv_symbol}: {data}")
             return 0, 0, True
-        df = feed.get_hist(symbol=tv_symbol, exchange=tv_exchange, interval=TV_Interval.in_1_minute, n_bars=15)
-        if df is None or df.empty or len(df) < 11:
+        closes = data["c"]
+        opens = data["o"]
+        if len(closes) < 11:
             return 0, 0, True
-        # Last 10 ta candel (running candel bad diye ager 10 ta)
-        last_10 = df.tail(11).head(10)
+        # Last 10 closed candel (running ta bad diye)
+        last_10_o = opens[-11:-1]
+        last_10_c = closes[-11:-1]
         green = 0
         red = 0
-        for i in range(len(last_10)):
-            row = last_10.iloc[i]
-            if float(row['close']) > float(row['open']):
+        for o, c in zip(last_10_o, last_10_c):
+            if c > o:
                 green += 1
             else:
                 red += 1
-        last = df.iloc[-2]  # Last closed candel
-        last_green = float(last['close']) > float(last['open'])
+        last_green = closes[-2] > opens[-2]
         return green, red, last_green
     except Exception as e:
         print(f"TradingView History Error {tv_symbol}: {e}")
@@ -126,16 +121,19 @@ def check_all_markets(manual=False):
         reason = ""
         price_line = ""
         rule_name = ""
+        # PRIORITY 1: OP-1 RULE 1 BUY
         if green_count >= 6 and is_upore and 40 <= rsi <= 70:
             direction = "🟢 BUY"
             rule_name = "OP-1 Rule 1 [TradingView]"
             reason = f"OP-1: TradingView 10 Candel e {green_count} SOBUJ + UPORE (EMA {ema:.5f}) + RSI {round(rsi)} (40-70)"
             price_line = f"TradingView Price {price:.5f} - Quotex e ei dam er kachakachi dekhle BUY"
+        # PRIORITY 2: OP-1 RULE 2 SELL
         elif red_count >= 6 and is_niche and 30 <= rsi <= 60:
             direction = "🔴 SELL"
             rule_name = "OP-1 Rule 2 [TradingView]"
             reason = f"OP-1: TradingView 10 Candel e {red_count} LAL + NICHE (EMA {ema:.5f}) + RSI {round(rsi)} (30-60)"
             price_line = f"TradingView Price {price:.5f} - Quotex e ei dam er kachakachi dekhle SELL"
+        # PRIORITY 3: EXTRA STRONG
         elif green_count >= 9 and is_upore:
             direction = "🟢 BUY"
             rule_name = "EXTRA STRONG [TradingView]"
@@ -146,6 +144,7 @@ def check_all_markets(manual=False):
             rule_name = "EXTRA STRONG [TradingView]"
             reason = f"EXTRA STRONG: TradingView 10 Candel e {red_count}/10 LAL + NICHE + RSI {round(rsi)}"
             price_line = f"TradingView Price {price:.5f} - Quotex e ei dam er kachakachi dekhle SELL"
+        # PRIORITY 4: WAIT
         elif last_red and is_upore and 40 <= rsi <= 70:
             if manual:
                 send_telegram(f"⏳ {pair_name} - Rule 3: LAL + UPORE = WAIT [TradingView RSI {round(rsi)}]")
