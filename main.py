@@ -3,7 +3,7 @@ import threading, os
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "BOT RUNNING - REAL MARKET ONLY"
+    return "BOT RUNNING - 40 SEC ZONE TOUCH - REAL + OTC"
 threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))).start()
 
 import time
@@ -17,6 +17,7 @@ def now_bd():
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
+# ===== REAL PAIRS =====
 GROUP_A = {
     "EUR/USD": {"yahoo": "EURUSD=X", "tv_symbol": "EURUSD", "tv_exchange": "OANDA"},
     "GBP/USD": {"yahoo": "GBPUSD=X", "tv_symbol": "GBPUSD", "tv_exchange": "OANDA"},
@@ -30,6 +31,16 @@ GROUP_B = {
 }
 ALL_PAIRS = {**GROUP_A, **GROUP_B}
 
+# ===== OTC PAIRS =====
+OTC_PAIRS = {
+    "EUR/USD OTC": {"yahoo": "EURUSD=X", "tv_symbol": "EURUSD", "tv_exchange": "OANDA"},
+    "GBP/USD OTC": {"yahoo": "GBPUSD=X", "tv_symbol": "GBPUSD", "tv_exchange": "OANDA"},
+    "USD/JPY OTC": {"yahoo": "USDJPY=X", "tv_symbol": "USDJPY", "tv_exchange": "OANDA"},
+    "AUD/USD OTC": {"yahoo": "AUDUSD=X", "tv_symbol": "AUDUSD", "tv_exchange": "OANDA"},
+    "USD/CAD OTC": {"yahoo": "USDCAD=X", "tv_symbol": "USDCAD", "tv_exchange": "OANDA"},
+    "EUR/JPY OTC": {"yahoo": "EURJPY=X", "tv_symbol": "EURJPY", "tv_exchange": "OANDA"},
+}
+
 sent_signals = {}
 today_win = 0
 today_loss = 0
@@ -38,6 +49,7 @@ last_update_id = 0
 last_signal_minute = ""
 last_heartbeat = 0
 last_auto_wait_msg = 0
+otc_mode_manual = False
 
 def send_telegram(msg):
     try:
@@ -48,15 +60,20 @@ def send_telegram(msg):
 
 def is_forex_market_open():
     now = now_bd()
-    # Saturday = 5, Sunday = 6 - Market Closed
     if now.weekday() == 5:
         return False
     if now.weekday() == 6:
         return False
-    # Friday 11 PM er por Market Closed
     if now.weekday() == 4 and now.hour >= 23:
         return False
     return True
+
+def is_otc_time():
+    if otc_mode_manual:
+        return True
+    if not is_forex_market_open():
+        return True
+    return False
 
 def calc_ema(closes, period=20):
     if len(closes) < period:
@@ -86,29 +103,42 @@ def calc_rsi(closes, period=14):
     return 100 - (100 / (1 + rs))
 
 def build_from_candles(closes, opens, highs, lows):
-    if len(closes) < 25:
+    if len(closes) < 35:
         return None, None
     price = float(closes[-1])
     open_price = float(opens[-1])
+    high_price = float(highs[-1])
+    low_price = float(lows[-1])
     rsi = float(calc_rsi(closes))
     ema20 = float(calc_ema(closes, 20))
-    tv = {"price": price, "open": open_price, "rsi": rsi, "ema20": ema20}
-    use_highs = highs[-31:-1]
-    use_lows = lows[-31:-1]
-    support = float(min(use_lows))
-    resistance = float(max(use_highs))
-    last_close = float(closes[-2])
-    last_open = float(opens[-2])
-    last_green = last_close > last_open
+
+    # ===== ZONE CALCULATION - গত 30 ক্যান্ডেল থেকে =====
+    # Resistance Zone = সবচেয়ে উপরের High গুলা
+    # Support Zone = সবচেয়ে নিচের Low গুলা
+    last_30_highs = sorted(highs[-31:-1], reverse=True)
+    last_30_lows = sorted(lows[-31:-1])
+    # Top 3 High এর গড় = Resistance Zone Center
+    res_center = float(sum(last_30_highs[:3]) / 3)
+    sup_center = float(sum(last_30_lows[:3]) / 3)
+    # Zone Width - Price এর 0.05%
+    zone_width = price * 0.0005
+    # JPY Pair এর জন্য Width বড়
+    if price > 50:
+        zone_width = price * 0.0005
+
+    tv = {
+        "price": price, "open": open_price, "high": high_price, "low": low_price,
+        "rsi": rsi, "ema20": ema20, "closes": closes, "opens": opens, "highs": highs, "lows": lows
+    }
     sr = {
-        "support": support,
-        "resistance": resistance,
-        "middle": float((support + resistance)/2),
-        "range_pips": float(resistance - support),
-        "last_green": last_green,
-        "last_red": not last_green,
-        "last_close": last_close,
-        "last_open": last_open,
+        "res_center": res_center,
+        "res_top": res_center + zone_width,
+        "res_bottom": res_center - zone_width,
+        "sup_center": sup_center,
+        "sup_top": sup_center + zone_width,
+        "sup_bottom": sup_center - zone_width,
+        "zone_width": zone_width,
+        "range": float(res_center - sup_center),
     }
     return tv, sr
 
@@ -132,7 +162,7 @@ def get_data_and_sr(pair_info):
             opens = opens[-50:]
             highs = highs[-50:]
             lows = lows[-50:]
-            if len(closes) >= 25:
+            if len(closes) >= 35:
                 return build_from_candles(closes, opens, highs, lows)
     except Exception as e:
         print(f"Yahoo Error {yahoo_symbol}: {e}")
@@ -150,16 +180,53 @@ def get_data_and_sr(pair_info):
         print(f"TV Backup Error {tv_symbol}: {e}")
     return None, None
 
-def check_all_markets(manual=False):
+# ===== 40 SEC ZONE TOUCH LOGIC - ক্লাসের নিয়ম =====
+def check_zone_touch(tv, sr, is_otc=False):
+    price = tv["price"]
+    open_p = tv["open"]
+    high_p = tv["high"]
+    low_p = tv["low"]
+    rsi = tv["rsi"]
+    closes = tv["closes"]
+
+    # --- OTC MANIPULATION CHECK - শেষ মুহূর্তে হঠাৎ স্পাইক ---
+    if is_otc and len(closes) >= 4:
+        last_move = abs(closes[-1] - closes[-4]) / closes[-4] * 100 if closes[-4] != 0 else 0
+        if last_move > 0.15:
+            return None, "MANIPULATION - হঠাৎ স্পাইক, Broker ঘুরাইতেছে"
+
+    # ===== RULE 1: RESISTANCE ZONE TOUCH = DOWN =====
+    # Price Resistance Zone এর ভিতরে ঢুকছে কিনা?
+    in_res_zone = (price >= sr["res_bottom"] and price <= sr["res_top"]) or (high_p >= sr["res_bottom"] and high_p <= sr["res_top"] + sr["zone_width"])
+    # Wick Check - উপরে লম্বা Wick আছে কিনা? High থেকে Price নিচে নেমে আসছে?
+    # Candle এর Range এর 30% এর বেশি উপরে Wick থাকতে হবে
+    candle_range = high_p - low_p if high_p != low_p else 0.00001
+    upper_wick = high_p - max(price, open_p)
+    upper_wick_ratio = upper_wick / candle_range if candle_range > 0 else 0
+    res_wick_ok = upper_wick_ratio >= 0.30
+
+    if in_res_zone and res_wick_ok:
+        # RSI Confirm - Resistance এ RSI 50 এর উপরে থাকলে ভালো, 70 এর উপরে হলে Overbought
+        # RSI 45-75 হলে OK
+        if 45 <= rsi <= 80:
+            return "🔴 SELL", f"Resistance Zone {sr['res_center']:.5f} Touch + Wick Rejection + RSI {round(rsi)}"
+
+    # ===== RULE 2: SUPPORT ZONE TOUCH = UP =====
+    in_sup_zone = (price >= sr["sup_bottom"] and price <= sr["sup_top"]) or (low_p >= sr["sup_bottom"] - sr["zone_width"] and low_p <= sr["sup_top"])
+    lower_wick = min(price, open_p) - low_p
+    lower_wick_ratio = lower_wick / candle_range if candle_range > 0 else 0
+    sup_wick_ok = lower_wick_ratio >= 0.30
+
+    if in_sup_zone and sup_wick_ok:
+        if 20 <= rsi <= 55:
+            return "🟢 BUY", f"Support Zone {sr['sup_center']:.5f} Touch + Wick Rejection + RSI {round(rsi)}"
+
+    # ===== কোনো Zone এ নাই = WAIT =====
+    return None, f"Zone Touch হয় নাই - Price {price:.5f} | Res Zone {sr['res_bottom']:.5f}-{sr['res_top']:.5f} | Sup Zone {sr['sup_bottom']:.5f}-{sr['sup_top']:.5f} | RSI {round(rsi)}"
+
+def check_all_markets(manual=False, force_otc=False):
     global last_signal_minute, last_auto_wait_msg
     now = now_bd()
-
-    # MARKET CLOSED HOLE SIGNAL DIBO NA
-    if not is_forex_market_open():
-        if manual:
-            send_telegram("⛔ Real Market Closed - Sat/Sun\n✅ Market Khulbe Monday Sokal\n❌ OTC Signal OFF - OTC dibo na")
-        return
-
     entry_dt = now + timedelta(minutes=1)
     next_candle_time = entry_dt.strftime("%H:%M")
     if not manual and next_candle_time == last_signal_minute:
@@ -167,22 +234,30 @@ def check_all_markets(manual=False):
     if not manual and next_candle_time in sent_signals:
         return
 
-    if manual:
-        PAIRS_TO_CHECK = ALL_PAIRS
-        group_name = "REAL - ALL 7"
+    use_otc = force_otc or is_otc_time()
+    if use_otc:
+        PAIRS_TO_CHECK = OTC_PAIRS
+        group_name = "OTC - 40 SEC ZONE TOUCH"
+        mode_txt = "OTC"
     else:
-        if now.minute % 2 == 0:
-            PAIRS_TO_CHECK = GROUP_A
-            group_name = "REAL - GROUP A (4 Pair)"
+        if manual:
+            PAIRS_TO_CHECK = ALL_PAIRS
+            group_name = "REAL - ALL 7 - 40 SEC ZONE"
         else:
-            PAIRS_TO_CHECK = GROUP_B
-            group_name = "REAL - GROUP B (3 Pair)"
+            if now.minute % 2 == 0:
+                PAIRS_TO_CHECK = GROUP_A
+                group_name = "REAL - GROUP A - 40 SEC ZONE"
+            else:
+                PAIRS_TO_CHECK = GROUP_B
+                group_name = "REAL - GROUP B - 40 SEC ZONE"
+        mode_txt = "REAL"
 
     print(f"Checking {group_name} at {now.strftime('%H:%M:%S')}")
     start_time = time.time()
     checked = 0
     failed = 0
     wait_list = []
+    best_signal = None
 
     for pair_name, symbols in PAIRS_TO_CHECK.items():
         try:
@@ -196,98 +271,60 @@ def check_all_markets(manual=False):
                 continue
 
             price = tv["price"]
-            ema20 = tv["ema20"]
-            rsi = tv["rsi"]
-            support = sr["support"]
-            resistance = sr["resistance"]
-            last_green = sr["last_green"]
-            last_red = sr["last_red"]
-
-            is_sobuj = last_green
-            is_lal = last_red
-            is_upore = price > ema20
-            is_niche = price < ema20
-            dist_support_pct = abs(price - support) / price * 100 if price != 0 else 999
-            dist_resistance_pct = abs(price - resistance) / price * 100 if price != 0 else 999
-            near_support = dist_support_pct <= 0.12 or price < support
-            near_resistance = dist_resistance_pct <= 0.12 or price > resistance
-            breakout_up = price > resistance
-            breakdown_down = price < support
-            sr_near_support = dist_support_pct <= 0.08 and price > support
-            sr_near_resistance = dist_resistance_pct <= 0.08 and price < resistance
-            min_range = 0.0004 if "JPY" not in pair_name else 0.04
-            if sr["range_pips"] < min_range:
+            # Zone এর Range খুব ছোট হলে FLAT - Trade নিবো না
+            if sr["range"] < (0.0004 if price < 50 else 0.04):
                 wait_list.append(f"{pair_name} FLAT")
                 if manual:
-                    send_telegram(f"⏳ {pair_name} - FLAT = WAIT")
+                    send_telegram(f"⏳ {pair_name} - FLAT Zone = WAIT")
                 time.sleep(0.5)
                 continue
 
-            direction = None
-            reason = ""
-            price_line = ""
-            signal_type = ""
-            if is_sobuj and is_upore and 40 <= rsi <= 70 and (near_support or breakout_up):
-                direction = "🟢 BUY"
-                signal_type = "STRONG - OP-1"
-                sr_txt = "Breakout" if breakout_up else f"Support {support:.5f} Bounce"
-                reason = f"OP-1: SOBUJ + EMA UPORE + RSI {round(rsi)} + {sr_txt}"
-                price_line = f"Price {price:.5f} | S {support:.5f} | R {resistance:.5f}"
-            elif is_lal and is_niche and 30 <= rsi <= 60 and (near_resistance or breakdown_down):
-                direction = "🔴 SELL"
-                signal_type = "STRONG - OP-1"
-                sr_txt = "Breakdown" if breakdown_down else f"Resistance {resistance:.5f} Rejection"
-                reason = f"OP-1: LAL + EMA NICHE + RSI {round(rsi)} + {sr_txt}"
-                price_line = f"Price {price:.5f} | S {support:.5f} | R {resistance:.5f}"
-            elif sr_near_support and 25 <= rsi <= 55:
-                direction = "🟢 BUY"
-                signal_type = "SR FALLBACK"
-                reason = f"SR: Support {support:.5f} kache + RSI {round(rsi)}"
-                price_line = f"Price {price:.5f} | S {support:.5f} | R {resistance:.5f}"
-            elif sr_near_resistance and 45 <= rsi <= 75:
-                direction = "🔴 SELL"
-                signal_type = "SR FALLBACK"
-                reason = f"SR: Resistance {resistance:.5f} kache + RSI {round(rsi)}"
-                price_line = f"Price {price:.5f} | S {support:.5f} | R {resistance:.5f}"
-            elif breakout_up and 55 <= rsi <= 75:
-                direction = "🟢 BUY"
-                signal_type = "SR FALLBACK"
-                reason = f"Breakout R {resistance:.5f} + RSI {round(rsi)}"
-                price_line = f"Price {price:.5f} | Breakout R {resistance:.5f}"
-            elif breakdown_down and 25 <= rsi <= 45:
-                direction = "🔴 SELL"
-                signal_type = "SR FALLBACK"
-                reason = f"Breakdown S {support:.5f} + RSI {round(rsi)}"
-                price_line = f"Price {price:.5f} | Breakdown S {support:.5f}"
-            else:
+            direction, reason = check_zone_touch(tv, sr, is_otc=use_otc)
+            if direction is None:
                 wait_list.append(f"{pair_name} WAIT")
                 if manual:
-                    send_telegram(f"⏳ {pair_name} - WAIT\nLast {'SOBUJ' if is_sobuj else 'LAL'} + {'UPORE' if is_upore else 'NICHE'} + RSI {round(rsi)}\nPrice {price:.5f} | S {support:.5f} | R {resistance:.5f}")
+                    send_telegram(f"⏳ {pair_name} - WAIT\n{reason}\nPrice {price:.5f} | Open {tv['open']:.5f} | High {tv['high']:.5f} | Low {tv['low']:.5f}")
                 time.sleep(0.5)
                 continue
 
-            tag = "✋ MANUAL" if manual else "🤖 AUTO"
-            # TOMAR CORRECTION ORDER - Entry Time UPORE
-            msg = f"""🕒 Entry Time: {next_candle_time} (BD Time)
-📊 Asset: {pair_name}
-🎯 Direction: {direction}
-⏱️ Expiry: M1
-🚨 {tag} - {signal_type}
-💰 Price: {price_line}
-✅ Reason: {reason}
-📩 Signal Time: {now.strftime('%H:%M:%S')}"""
-            send_telegram(msg)
-            sent_signals[next_candle_time] = {"pair": pair_name, "direction": direction, "pair_info": symbols, "entry_price": price, "entry_time": next_candle_time}
-            last_signal_minute = next_candle_time
-            return
+            # Zone Touch মিলে গেছে - Best Signal
+            if best_signal is None:
+                best_signal = (pair_name, symbols, direction, price, tv, sr, reason)
+            # Manual হলে প্রথমটাই পাঠাই দেই, Auto হলে Best টা পরে পাঠাবো
+            if manual:
+                break
+            else:
+                continue
 
         except Exception as e:
             print(f"Pair Error {pair_name}: {e}")
             continue
 
-    if manual:
-        elapsed = round(time.time() - start_time, 1)
-        send_telegram(f"🏁 CHECK SES - {elapsed}s\nChecked: {checked} | Fail: {failed}\nWAIT: {', '.join(wait_list) if wait_list else 'Nai'}")
+    if best_signal:
+        pair_name, symbols, direction, price, tv, sr, reason = best_signal
+        tag = "✋ MANUAL" if manual else "🤖 AUTO"
+        msg = f"""🕒 Entry Time: {next_candle_time} (BD Time)
+📊 Asset: {pair_name}
+🎯 Direction: {direction}
+⏱️ Expiry: M1
+🚨 {tag} - 40 SEC ZONE TOUCH ✅
+💰 Price: {price:.5f}
+📍 Res Zone: {sr['res_bottom']:.5f} - {sr['res_top']:.5f}
+📍 Sup Zone: {sr['sup_bottom']:.5f} - {sr['sup_top']:.5f}
+✅ Reason: {reason}
+📩 Signal Time: {now.strftime('%H:%M:%S')}"""
+        send_telegram(msg)
+        sent_signals[next_candle_time] = {"pair": pair_name, "direction": direction, "pair_info": symbols, "entry_price": price, "entry_time": next_candle_time}
+        last_signal_minute = next_candle_time
+        return
+    else:
+        if manual:
+            send_telegram(f"🏁 CHECK SES - Zone Touch মিলে নাই, তাই Signal দেই নাই\nChecked: {checked} | WAIT: {', '.join(wait_list)}")
+        else:
+            if time.time() - last_auto_wait_msg >= 600:
+                last_auto_wait_msg = time.time()
+                send_telegram(f"⏳ AUTO - {now.strftime('%H:%M:%S')} - Zone Touch হয় নাই, WAIT...\nMode: {mode_txt} | Checked: {checked} Pair")
+        return
 
 def check_results():
     global today_win, today_loss
@@ -337,7 +374,7 @@ def check_results():
         del sent_signals[k]
 
 def check_telegram_commands():
-    global last_update_id, today_win, today_loss
+    global last_update_id, today_win, today_loss, otc_mode_manual
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset={last_update_id+1}&timeout=2"
         r = requests.get(url, timeout=5).json()
@@ -348,11 +385,21 @@ def check_telegram_commands():
             msg_data = upd.get("message", {})
             text = (msg_data.get("text") or "").strip().lower()
             if text == "signal":
-                if not is_forex_market_open():
-                    send_telegram("⛔ Real Market Closed - Sat/Sun\n✅ Market Khulbe Monday Sokal\n❌ OTC Signal OFF")
+                if is_otc_time():
+                    send_telegram("🔍 OTC Check kortesi - 40 SEC Zone Touch...")
+                    check_all_markets(manual=True, force_otc=True)
                 else:
-                    send_telegram("🔍 Real Check kortesi...")
+                    send_telegram("🔍 Real Check kortesi - 40 SEC Zone Touch...")
                     check_all_markets(manual=True)
+            elif text == "otc":
+                send_telegram("🔍 OTC Check kortesi - 40 SEC Zone Touch...")
+                check_all_markets(manual=True, force_otc=True)
+            elif text == "otc on":
+                otc_mode_manual = True
+                send_telegram("✅ OTC MODE ON")
+            elif text == "otc off":
+                otc_mode_manual = False
+                send_telegram("✅ OTC MODE OFF - Real Mode")
             elif text == "win":
                 today_win += 1
                 send_telegram(f"✅ WIN Record korsi\n📈 Total: {today_win} Win - {today_loss} Loss")
@@ -366,26 +413,24 @@ def check_telegram_commands():
     except Exception as e:
         print(f"Telegram Poll Error: {e}")
 
-send_telegram("🤖 BOT RESTARTED - REAL MARKET ONLY\n✅ OTC OFF - OTC Signal ar asbe na\n✅ Mon-Fri = Real Signal (7 Pair)\n✅ Sat/Sun = Market Closed\n✅ Command: signal / win / loss")
-print("BOT Started - Real Only")
+send_telegram("🤖 BOT RESTARTED - 40 SEC ZONE TOUCH\n✅ REAL + OTC - 2 tar jonnoi eki niyom\n✅ 40 Sec e Zone Touch holei Signal\n✅ Resistance Touch = SELL | Support Touch = BUY\n✅ Command: signal / otc / otc on / otc off / win / loss")
+print("BOT Started - 40 Sec Zone Touch")
 while True:
     try:
         now = now_bd()
-        # MARKET OPEN THAKLEI AUTO CHECK CHOLBE
-        if is_forex_market_open():
-            if 20 <= now.second <= 40:
-                if time.time() - last_auto_check >= 50:
-                    last_auto_check = time.time()
-                    print(f"AUTO CHECK REAL at {now.strftime('%H:%M:%S')}")
-                    check_all_markets(manual=False)
-            if time.time() - last_heartbeat >= 600:
-                last_heartbeat = time.time()
-                send_telegram(f"💓 BOT ALIVE - {now.strftime('%H:%M:%S')} BD Time\n✅ REAL MODE: Cholche - 7 Pair Rotation\n⏳ Signal mille nijei pathabo")
-        else:
-            # MARKET CLOSED HOLE 1 GHONTA POR POR EKTA MSG
-            if time.time() - last_heartbeat >= 3600:
-                last_heartbeat = time.time()
-                send_telegram(f"💤 MARKET CLOSED - {now.strftime('%H:%M:%S')} BD Time\n❌ OTC OFF - Signal dibo na\n✅ Market Khulbe Monday Sokal")
+        use_otc_now = is_otc_time()
+        # ===== 40 SEC LOGIC - 40 theke 50 sec er moddhe check =====
+        if 40 <= now.second <= 50:
+            if time.time() - last_auto_check >= 50:
+                last_auto_check = time.time()
+                print(f"AUTO CHECK 40SEC {'OTC' if use_otc_now else 'REAL'} at {now.strftime('%H:%M:%S')}")
+                check_all_markets(manual=False)
+        if time.time() - last_heartbeat >= 600:
+            last_heartbeat = time.time()
+            if use_otc_now:
+                send_telegram(f"💓 BOT ALIVE - {now.strftime('%H:%M:%S')} BD Time\n✅ OTC MODE: 40 SEC Zone Touch Cholche")
+            else:
+                send_telegram(f"💓 BOT ALIVE - {now.strftime('%H:%M:%S')} BD Time\n✅ REAL MODE: 40 SEC Zone Touch Cholche")
         check_telegram_commands()
         check_results()
         time.sleep(1)
