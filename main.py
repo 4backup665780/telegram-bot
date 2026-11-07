@@ -3,7 +3,7 @@ import threading, os
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "BOT RUNNING - REAL + OTC - SHORT SIGNAL"
+    return "BOT RUNNING - REAL MARKET ONLY"
 threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))).start()
 
 import time
@@ -16,7 +16,6 @@ def now_bd():
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
-AMOUNT = 3
 
 GROUP_A = {
     "EUR/USD": {"yahoo": "EURUSD=X", "tv_symbol": "EURUSD", "tv_exchange": "OANDA"},
@@ -31,15 +30,6 @@ GROUP_B = {
 }
 ALL_PAIRS = {**GROUP_A, **GROUP_B}
 
-OTC_PAIRS = {
-    "EUR/USD OTC": {"yahoo": "EURUSD=X", "tv_symbol": "EURUSD", "tv_exchange": "OANDA"},
-    "GBP/USD OTC": {"yahoo": "GBPUSD=X", "tv_symbol": "GBPUSD", "tv_exchange": "OANDA"},
-    "USD/JPY OTC": {"yahoo": "USDJPY=X", "tv_symbol": "USDJPY", "tv_exchange": "OANDA"},
-    "AUD/USD OTC": {"yahoo": "AUDUSD=X", "tv_symbol": "AUDUSD", "tv_exchange": "OANDA"},
-    "USD/CAD OTC": {"yahoo": "USDCAD=X", "tv_symbol": "USDCAD", "tv_exchange": "OANDA"},
-    "EUR/JPY OTC": {"yahoo": "EURJPY=X", "tv_symbol": "EURJPY", "tv_exchange": "OANDA"},
-}
-
 sent_signals = {}
 today_win = 0
 today_loss = 0
@@ -48,7 +38,6 @@ last_update_id = 0
 last_signal_minute = ""
 last_heartbeat = 0
 last_auto_wait_msg = 0
-otc_mode_manual = False
 
 def send_telegram(msg):
     try:
@@ -59,20 +48,15 @@ def send_telegram(msg):
 
 def is_forex_market_open():
     now = now_bd()
+    # Saturday = 5, Sunday = 6 - Market Closed
     if now.weekday() == 5:
         return False
     if now.weekday() == 6:
         return False
+    # Friday 11 PM er por Market Closed
     if now.weekday() == 4 and now.hour >= 23:
         return False
     return True
-
-def is_otc_time():
-    if otc_mode_manual:
-        return True
-    if not is_forex_market_open():
-        return True
-    return False
 
 def calc_ema(closes, period=20):
     if len(closes) < period:
@@ -166,51 +150,16 @@ def get_data_and_sr(pair_info):
         print(f"TV Backup Error {tv_symbol}: {e}")
     return None, None
 
-def calc_otc_score(is_buy, tv, sr, price):
-    score = 0
-    ema20 = tv["ema20"]
-    rsi = tv["rsi"]
-    support = sr["support"]
-    resistance = sr["resistance"]
-    last_green = sr["last_green"]
-    last_red = sr["last_red"]
-    dist_s = abs(price - support) / price * 100 if price != 0 else 999
-    dist_r = abs(price - resistance) / price * 100 if price != 0 else 999
-    if is_buy and last_green:
-        score += 20
-    elif not is_buy and last_red:
-        score += 20
-    else:
-        return 0
-    if is_buy and price > ema20:
-        score += 20
-    elif not is_buy and price < ema20:
-        score += 20
-    if is_buy and 45 <= rsi <= 65:
-        score += 20
-    elif not is_buy and 35 <= rsi <= 55:
-        score += 20
-    elif is_buy and 40 <= rsi <= 70:
-        score += 10
-    elif not is_buy and 30 <= rsi <= 60:
-        score += 10
-    if is_buy and (dist_s <= 0.08 or price < support):
-        score += 20
-    elif not is_buy and (dist_r <= 0.08 or price > resistance):
-        score += 20
-    elif is_buy and dist_s <= 0.15:
-        score += 10
-    elif not is_buy and dist_r <= 0.15:
-        score += 10
-    if is_buy and price > resistance:
-        score += 10
-    elif not is_buy and price < support:
-        score += 10
-    return score
-
-def check_all_markets(manual=False, force_otc=False):
+def check_all_markets(manual=False):
     global last_signal_minute, last_auto_wait_msg
     now = now_bd()
+
+    # MARKET CLOSED HOLE SIGNAL DIBO NA
+    if not is_forex_market_open():
+        if manual:
+            send_telegram("⛔ Real Market Closed - Sat/Sun\n✅ Market Khulbe Monday Sokal\n❌ OTC Signal OFF - OTC dibo na")
+        return
+
     entry_dt = now + timedelta(minutes=1)
     next_candle_time = entry_dt.strftime("%H:%M")
     if not manual and next_candle_time == last_signal_minute:
@@ -218,29 +167,22 @@ def check_all_markets(manual=False, force_otc=False):
     if not manual and next_candle_time in sent_signals:
         return
 
-    use_otc = force_otc or is_otc_time()
-    if use_otc:
-        PAIRS_TO_CHECK = OTC_PAIRS
-        group_name = "OTC MODE - 6 Pair - 70%+ Only"
+    if manual:
+        PAIRS_TO_CHECK = ALL_PAIRS
+        group_name = "REAL - ALL 7"
     else:
-        if manual:
-            PAIRS_TO_CHECK = ALL_PAIRS
-            group_name = "REAL - ALL 7"
+        if now.minute % 2 == 0:
+            PAIRS_TO_CHECK = GROUP_A
+            group_name = "REAL - GROUP A (4 Pair)"
         else:
-            if now.minute % 2 == 0:
-                PAIRS_TO_CHECK = GROUP_A
-                group_name = "REAL - GROUP A (4 Pair)"
-            else:
-                PAIRS_TO_CHECK = GROUP_B
-                group_name = "REAL - GROUP B (3 Pair)"
+            PAIRS_TO_CHECK = GROUP_B
+            group_name = "REAL - GROUP B (3 Pair)"
 
     print(f"Checking {group_name} at {now.strftime('%H:%M:%S')}")
     start_time = time.time()
     checked = 0
     failed = 0
     wait_list = []
-    best_signal = None
-    best_score = 0
 
     for pair_name, symbols in PAIRS_TO_CHECK.items():
         try:
@@ -260,28 +202,6 @@ def check_all_markets(manual=False, force_otc=False):
             resistance = sr["resistance"]
             last_green = sr["last_green"]
             last_red = sr["last_red"]
-
-            if use_otc:
-                buy_score = calc_otc_score(True, tv, sr, price)
-                sell_score = calc_otc_score(False, tv, sr, price)
-                if buy_score >= sell_score:
-                    score = buy_score
-                    direction = "🔴 SELL" if False else "🟢 BUY"
-                    # uporer line ta thik korlam, niche sothik direction
-                    direction = "🟢 BUY"
-                else:
-                    score = sell_score
-                    direction = "🔴 SELL"
-                if score < 70:
-                    wait_list.append(f"{pair_name} {score}%")
-                    if manual:
-                        send_telegram(f"⏳ {pair_name} - Score {score}% LOW = WAIT (70+ lagbe)\nPrice {price:.5f} | RSI {round(rsi)}")
-                    time.sleep(0.5)
-                    continue
-                if score > best_score:
-                    best_score = score
-                    best_signal = (pair_name, symbols, direction, price, tv, sr)
-                continue
 
             is_sobuj = last_green
             is_lal = last_red
@@ -347,7 +267,7 @@ def check_all_markets(manual=False, force_otc=False):
                 continue
 
             tag = "✋ MANUAL" if manual else "🤖 AUTO"
-            # REAL SIGNAL - TOMAR ORDER E
+            # TOMAR CORRECTION ORDER - Entry Time UPORE
             msg = f"""🕒 Entry Time: {next_candle_time} (BD Time)
 📊 Asset: {pair_name}
 🎯 Direction: {direction}
@@ -364,32 +284,6 @@ def check_all_markets(manual=False, force_otc=False):
         except Exception as e:
             print(f"Pair Error {pair_name}: {e}")
             continue
-
-    if use_otc:
-        if best_signal:
-            pair_name, symbols, direction, price, tv, sr = best_signal
-            tag = "✋ MANUAL" if manual else "🤖 AUTO"
-            # CORRECTION ORDER - TOMAR DEWA ORDER HUBOHU
-            msg = f"""🕒 Entry Time: {next_candle_time} (BD Time)
-📊 Asset: {pair_name}
-🎯 Direction: {direction}
-⏱️ Expiry: M1
-🚨 {tag} - OTC STRONG {best_score}% 🔥
-💰 Price: {price:.5f} | S {sr['support']:.5f} | R {sr['resistance']:.5f}
-✅ Confidence: {best_score}% Strong
-📩 Signal Time: {now.strftime('%H:%M:%S')}"""
-            send_telegram(msg)
-            sent_signals[next_candle_time] = {"pair": pair_name, "direction": direction, "pair_info": symbols, "entry_price": price, "entry_time": next_candle_time}
-            last_signal_minute = next_candle_time
-            return
-        else:
-            if manual:
-                send_telegram(f"🏁 OTC CHECK SES - Kono 70%+ Signal nai\nChecked: {checked} | WAIT: {', '.join(wait_list)}")
-            else:
-                if time.time() - last_auto_wait_msg >= 600:
-                    last_auto_wait_msg = time.time()
-                    send_telegram(f"⏳ OTC AUTO - {now.strftime('%H:%M:%S')} - Kono 70%+ Strong Signal nai, WAIT...\nChecked: {checked} Pair")
-            return
 
     if manual:
         elapsed = round(time.time() - start_time, 1)
@@ -443,7 +337,7 @@ def check_results():
         del sent_signals[k]
 
 def check_telegram_commands():
-    global last_update_id, today_win, today_loss, otc_mode_manual
+    global last_update_id, today_win, today_loss
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset={last_update_id+1}&timeout=2"
         r = requests.get(url, timeout=5).json()
@@ -454,21 +348,11 @@ def check_telegram_commands():
             msg_data = upd.get("message", {})
             text = (msg_data.get("text") or "").strip().lower()
             if text == "signal":
-                if is_otc_time():
-                    send_telegram("🔍 OTC Check kortesi - 70%+ Strong holei dibo...")
-                    check_all_markets(manual=True, force_otc=True)
+                if not is_forex_market_open():
+                    send_telegram("⛔ Real Market Closed - Sat/Sun\n✅ Market Khulbe Monday Sokal\n❌ OTC Signal OFF")
                 else:
                     send_telegram("🔍 Real Check kortesi...")
                     check_all_markets(manual=True)
-            elif text == "otc":
-                send_telegram("🔍 OTC Check kortesi - 70%+ Strong holei dibo...")
-                check_all_markets(manual=True, force_otc=True)
-            elif text == "otc on":
-                otc_mode_manual = True
-                send_telegram("✅ OTC MODE ON - 70%+ Strong Only")
-            elif text == "otc off":
-                otc_mode_manual = False
-                send_telegram("✅ OTC MODE OFF - Real Mode")
             elif text == "win":
                 today_win += 1
                 send_telegram(f"✅ WIN Record korsi\n📈 Total: {today_win} Win - {today_loss} Loss")
@@ -482,23 +366,26 @@ def check_telegram_commands():
     except Exception as e:
         print(f"Telegram Poll Error: {e}")
 
-send_telegram("🤖 BOT RESTARTED - REAL + OTC - SHORT SIGNAL\n✅ Sat/Sun = OTC Mode (70%+ holei Signal)\n✅ Mon-Fri = Real Mode\n✅ Command: signal / otc / otc on / otc off / win / loss")
-print("BOT Started - Real + OTC Short")
+send_telegram("🤖 BOT RESTARTED - REAL MARKET ONLY\n✅ OTC OFF - OTC Signal ar asbe na\n✅ Mon-Fri = Real Signal (7 Pair)\n✅ Sat/Sun = Market Closed\n✅ Command: signal / win / loss")
+print("BOT Started - Real Only")
 while True:
     try:
         now = now_bd()
-        use_otc_now = is_otc_time()
-        if 20 <= now.second <= 40:
-            if time.time() - last_auto_check >= 50:
-                last_auto_check = time.time()
-                print(f"AUTO CHECK {'OTC' if use_otc_now else 'REAL'} at {now.strftime('%H:%M:%S')}")
-                check_all_markets(manual=False)
-        if time.time() - last_heartbeat >= 600:
-            last_heartbeat = time.time()
-            if use_otc_now:
-                send_telegram(f"💓 BOT ALIVE - {now.strftime('%H:%M:%S')} BD Time\n✅ OTC MODE: Cholche - 70%+ Strong holei Signal dibo")
-            else:
-                send_telegram(f"💓 BOT ALIVE - {now.strftime('%H:%M:%S')} BD Time\n✅ REAL MODE: Cholche - 7 Pair Rotation")
+        # MARKET OPEN THAKLEI AUTO CHECK CHOLBE
+        if is_forex_market_open():
+            if 20 <= now.second <= 40:
+                if time.time() - last_auto_check >= 50:
+                    last_auto_check = time.time()
+                    print(f"AUTO CHECK REAL at {now.strftime('%H:%M:%S')}")
+                    check_all_markets(manual=False)
+            if time.time() - last_heartbeat >= 600:
+                last_heartbeat = time.time()
+                send_telegram(f"💓 BOT ALIVE - {now.strftime('%H:%M:%S')} BD Time\n✅ REAL MODE: Cholche - 7 Pair Rotation\n⏳ Signal mille nijei pathabo")
+        else:
+            # MARKET CLOSED HOLE 1 GHONTA POR POR EKTA MSG
+            if time.time() - last_heartbeat >= 3600:
+                last_heartbeat = time.time()
+                send_telegram(f"💤 MARKET CLOSED - {now.strftime('%H:%M:%S')} BD Time\n❌ OTC OFF - Signal dibo na\n✅ Market Khulbe Monday Sokal")
         check_telegram_commands()
         check_results()
         time.sleep(1)
