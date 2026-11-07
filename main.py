@@ -3,7 +3,7 @@ import threading, os
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "BOT RUNNING - 7 PAIRS - YAHOO FINANCE"
+    return "BOT RUNNING - 7 PAIRS - YAHOO - MARKET CHECK"
 threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))).start()
 
 import time
@@ -46,6 +46,19 @@ def send_telegram(msg):
         requests.post(url, json={"chat_id": CHAT_ID, "text": msg}, timeout=10)
     except Exception as e:
         print(f"Telegram Error: {e}")
+
+# MARKET OPEN CHECK - Sat/Sun Bondho
+def is_forex_market_open():
+    now = now_bd()
+    # Saturday = 5, Sunday = 6 - Full Closed
+    if now.weekday() == 5:
+        return False
+    if now.weekday() == 6:
+        return False
+    # Friday 11 PM BD er por Closed (Friday 10 PM GMT = Saturday 4 AM BD)
+    if now.weekday() == 4 and now.hour >= 23:
+        return False
+    return True
 
 def calc_ema(closes, period=20):
     if len(closes) < period:
@@ -101,12 +114,12 @@ def build_from_candles(closes, opens, highs, lows):
     }
     return tv, sr
 
-# NEW: Yahoo Primary, TradingView Backup
+# Yahoo Primary, TradingView Backup
 def get_data_and_sr(pair_info):
     yahoo_symbol = pair_info["yahoo"]
     tv_symbol = pair_info["tv_symbol"]
     tv_exchange = pair_info["tv_exchange"]
-    # 1. TRY YAHOO - Primary
+    # 1. TRY YAHOO
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}?interval=1m&range=1d"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -119,7 +132,6 @@ def get_data_and_sr(pair_info):
             opens = [o for o in quote["open"] if o is not None]
             highs = [h for h in quote["high"] if h is not None]
             lows = [l for l in quote["low"] if l is not None]
-            # Last 50 candle nao
             closes = closes[-50:]
             opens = opens[-50:]
             highs = highs[-50:]
@@ -154,6 +166,12 @@ def get_data_and_sr(pair_info):
 def check_all_markets(manual=False):
     global last_signal_minute, last_auto_wait_msg
     now = now_bd()
+    # Manual e o Market Closed hole Signal dibe na, sudhu janabe
+    if not is_forex_market_open():
+        if manual:
+            send_telegram(f"😴 MARKET CLOSED - {now.strftime('%A %H:%M')} BD Time\n❌ Forex Market Bondho (Sat-Sun)\n🕒 Market Khulbe: Sombar Vor 4 AM BD Time\nSignal dibo na, Market khulle dibo.")
+        return
+
     entry_dt = now + timedelta(minutes=1)
     next_candle_time = entry_dt.strftime("%H:%M")
     if not manual and next_candle_time == last_signal_minute:
@@ -296,6 +314,8 @@ def check_all_markets(manual=False):
 def check_results():
     global today_win, today_loss
     now = now_bd()
+    if not is_forex_market_open():
+        return
     if not (5 <= now.second <= 20):
         return
     to_remove = []
@@ -367,11 +387,20 @@ def check_telegram_commands():
     except Exception as e:
         print(f"Telegram Poll Error: {e}")
 
-send_telegram("🤖 BOT RESTARTED - YAHOO FINANCE - 7 PAIRS\n✅ TradingView Block chilo, ekhon Yahoo Primary\n✅ Yahoo Fail korle TradingView Backup\n✅ Heartbeat: 10 min por por BOT ALIVE")
-print("BOT Started - Yahoo Finance")
+send_telegram("🤖 BOT RESTARTED - YAHOO - 7 PAIRS - MARKET CHECK\n✅ TradingView Block chilo, ekhon Yahoo Primary\n✅ Sat/Sun Market Closed hole Signal dibe na\n✅ Market Khulbe: Sombar Vor 4 AM BD Time\n✅ Heartbeat: 10 min por por BOT ALIVE")
+print("BOT Started - Yahoo - Market Check")
 while True:
     try:
         now = now_bd()
+        # MARKET CLOSED hole Auto Check bondho, 30 min e 1 bar janabe
+        if not is_forex_market_open():
+            if time.time() - last_heartbeat >= 1800:
+                last_heartbeat = time.time()
+                send_telegram(f"😴 MARKET CLOSED - {now.strftime('%A %H:%M')} BD Time\n❌ Forex Market Bondho (Sat-Sun)\n✅ Bot Jage Ache, Market Khulle Auto Signal Dibo\n🕒 Market Khulbe: Sombar Vor 4 AM BD Time")
+            check_telegram_commands()
+            time.sleep(5)
+            continue
+
         if 20 <= now.second <= 40:
             if time.time() - last_auto_check >= 50:
                 last_auto_check = time.time()
