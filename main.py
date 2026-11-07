@@ -3,7 +3,7 @@ import threading, os
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "BOT RUNNING - 7 PAIRS + ROTATION"
+    return "BOT RUNNING - 7 PAIRS - YAHOO FINANCE"
 threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))).start()
 
 import time
@@ -18,17 +18,16 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 AMOUNT = 3
 
-# 7 PAIRS - 2 GROUP E VAG KORA
 GROUP_A = {
-    "EUR/USD": {"tv_symbol": "EURUSD", "tv_exchange": "OANDA"},
-    "GBP/USD": {"tv_symbol": "GBPUSD", "tv_exchange": "OANDA"},
-    "USD/JPY": {"tv_symbol": "USDJPY", "tv_exchange": "OANDA"},
-    "EUR/JPY": {"tv_symbol": "EURJPY", "tv_exchange": "OANDA"},
+    "EUR/USD": {"yahoo": "EURUSD=X", "tv_symbol": "EURUSD", "tv_exchange": "OANDA"},
+    "GBP/USD": {"yahoo": "GBPUSD=X", "tv_symbol": "GBPUSD", "tv_exchange": "OANDA"},
+    "USD/JPY": {"yahoo": "USDJPY=X", "tv_symbol": "USDJPY", "tv_exchange": "OANDA"},
+    "EUR/JPY": {"yahoo": "EURJPY=X", "tv_symbol": "EURJPY", "tv_exchange": "OANDA"},
 }
 GROUP_B = {
-    "AUD/USD": {"tv_symbol": "AUDUSD", "tv_exchange": "OANDA"},
-    "USD/CAD": {"tv_symbol": "USDCAD", "tv_exchange": "OANDA"},
-    "GBP/JPY": {"tv_symbol": "GBPJPY", "tv_exchange": "OANDA"},
+    "AUD/USD": {"yahoo": "AUDUSD=X", "tv_symbol": "AUDUSD", "tv_exchange": "OANDA"},
+    "USD/CAD": {"yahoo": "USDCAD=X", "tv_symbol": "USDCAD", "tv_exchange": "OANDA"},
+    "GBP/JPY": {"yahoo": "GBPJPY=X", "tv_symbol": "GBPJPY", "tv_exchange": "OANDA"},
 }
 ALL_PAIRS = {**GROUP_A, **GROUP_B}
 
@@ -75,7 +74,64 @@ def calc_rsi(closes, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def get_data_and_sr(tv_symbol, tv_exchange):
+def build_from_candles(closes, opens, highs, lows):
+    if len(closes) < 25:
+        return None, None
+    price = float(closes[-1])
+    open_price = float(opens[-1])
+    rsi = float(calc_rsi(closes))
+    ema20 = float(calc_ema(closes, 20))
+    tv = {"price": price, "open": open_price, "rsi": rsi, "ema20": ema20}
+    use_highs = highs[-31:-1]
+    use_lows = lows[-31:-1]
+    support = float(min(use_lows))
+    resistance = float(max(use_highs))
+    last_close = float(closes[-2])
+    last_open = float(opens[-2])
+    last_green = last_close > last_open
+    sr = {
+        "support": support,
+        "resistance": resistance,
+        "middle": float((support + resistance)/2),
+        "range_pips": float(resistance - support),
+        "last_green": last_green,
+        "last_red": not last_green,
+        "last_close": last_close,
+        "last_open": last_open,
+    }
+    return tv, sr
+
+# NEW: Yahoo Primary, TradingView Backup
+def get_data_and_sr(pair_info):
+    yahoo_symbol = pair_info["yahoo"]
+    tv_symbol = pair_info["tv_symbol"]
+    tv_exchange = pair_info["tv_exchange"]
+    # 1. TRY YAHOO - Primary
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}?interval=1m&range=1d"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers, timeout=10)
+        data = r.json()
+        result = data.get("chart", {}).get("result", [None])[0]
+        if result:
+            quote = result["indicators"]["quote"][0]
+            closes = [c for c in quote["close"] if c is not None]
+            opens = [o for o in quote["open"] if o is not None]
+            highs = [h for h in quote["high"] if h is not None]
+            lows = [l for l in quote["low"] if l is not None]
+            # Last 50 candle nao
+            closes = closes[-50:]
+            opens = opens[-50:]
+            highs = highs[-50:]
+            lows = lows[-50:]
+            if len(closes) >= 25:
+                print(f"Yahoo OK {yahoo_symbol} len {len(closes)} price {closes[-1]}")
+                return build_from_candles(closes, opens, highs, lows)
+            else:
+                print(f"Yahoo Short {yahoo_symbol} len {len(closes)}")
+    except Exception as e:
+        print(f"Yahoo Error {yahoo_symbol}: {e}")
+    # 2. TRY TradingView Proxy - Backup
     try:
         now_ts = int(time.time())
         from_ts = now_ts - 50*60
@@ -84,41 +140,16 @@ def get_data_and_sr(tv_symbol, tv_exchange):
         headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get(url, headers=headers, timeout=10)
         data = r.json()
-        if data.get("s") != "ok" or "c" not in data:
-            print(f"History No Data {tv_symbol}")
-            return None, None
-        closes = data["c"]
-        opens = data["o"]
-        highs = data["h"]
-        lows = data["l"]
-        if len(closes) < 25:
-            return None, None
-        price = float(closes[-1])
-        open_price = float(opens[-1])
-        rsi = float(calc_rsi(closes))
-        ema20 = float(calc_ema(closes, 20))
-        tv = {"price": price, "open": open_price, "rsi": rsi, "ema20": ema20}
-        use_highs = highs[-31:-1]
-        use_lows = lows[-31:-1]
-        support = float(min(use_lows))
-        resistance = float(max(use_highs))
-        last_close = float(closes[-2])
-        last_open = float(opens[-2])
-        last_green = last_close > last_open
-        sr = {
-            "support": support,
-            "resistance": resistance,
-            "middle": float((support + resistance)/2),
-            "range_pips": float(resistance - support),
-            "last_green": last_green,
-            "last_red": not last_green,
-            "last_close": last_close,
-            "last_open": last_open,
-        }
-        return tv, sr
+        if data.get("s") == "ok" and "c" in data:
+            closes = data["c"]
+            opens = data["o"]
+            highs = data["h"]
+            lows = data["l"]
+            print(f"TV Backup OK {tv_symbol}")
+            return build_from_candles(closes, opens, highs, lows)
     except Exception as e:
-        print(f"History Error {tv_symbol}: {e}")
-        return None, None
+        print(f"TV Backup Error {tv_symbol}: {e}")
+    return None, None
 
 def check_all_markets(manual=False):
     global last_signal_minute, last_auto_wait_msg
@@ -130,10 +161,9 @@ def check_all_markets(manual=False):
     if not manual and next_candle_time in sent_signals:
         return
 
-    # ROTATION: Manual hole sob 7 ta, Auto hole minute onujayi group
     if manual:
         PAIRS_TO_CHECK = ALL_PAIRS
-        group_name = "MANUAL - ALL 7"
+        group_name = "MANUAL - ALL 7 (Yahoo)"
     else:
         if now.minute % 2 == 0:
             PAIRS_TO_CHECK = GROUP_A
@@ -151,11 +181,11 @@ def check_all_markets(manual=False):
     for pair_name, symbols in PAIRS_TO_CHECK.items():
         try:
             checked += 1
-            tv, sr = get_data_and_sr(symbols["tv_symbol"], symbols["tv_exchange"])
+            tv, sr = get_data_and_sr(symbols)
             if tv is None or sr is None:
                 failed += 1
                 if manual:
-                    send_telegram(f"❌ {pair_name} - History Data আসে নাই")
+                    send_telegram(f"❌ {pair_name} - Yahoo + TradingView 2 tai Fail (Network)")
                 time.sleep(0.8)
                 continue
 
@@ -245,7 +275,7 @@ def check_all_markets(manual=False):
 💰 Amount: ${AMOUNT}"""
             send_telegram(msg)
             print(f"Signal: {pair_name} {direction}")
-            sent_signals[next_candle_time] = {"pair": pair_name, "direction": direction, "tv_symbol": symbols["tv_symbol"], "tv_exchange": symbols["tv_exchange"], "entry_price": price, "entry_time": next_candle_time}
+            sent_signals[next_candle_time] = {"pair": pair_name, "direction": direction, "pair_info": symbols, "entry_price": price, "entry_time": next_candle_time}
             last_signal_minute = next_candle_time
             return
 
@@ -274,7 +304,7 @@ def check_results():
             candle_dt = datetime.strptime(candle_time, "%H:%M").replace(year=now.year, month=now.month, day=now.day, tzinfo=BD_TZ)
             diff = (now - candle_dt).total_seconds()
             if diff >= 65 and diff < 180:
-                tv, sr = get_data_and_sr(pred["tv_symbol"], pred["tv_exchange"])
+                tv, sr = get_data_and_sr(pred["pair_info"])
                 if tv is None:
                     continue
                 close_price = tv["price"]
@@ -322,7 +352,7 @@ def check_telegram_commands():
             msg_data = upd.get("message", {})
             text = (msg_data.get("text") or "").strip().lower()
             if text == "signal":
-                send_telegram("🔍 7 Pair Check kortesi (Rotation OFF - Manual e sob)...")
+                send_telegram("🔍 7 Pair Check kortesi - Yahoo Finance diye...")
                 check_all_markets(manual=True)
             elif text == "win":
                 today_win += 1
@@ -337,8 +367,8 @@ def check_telegram_commands():
     except Exception as e:
         print(f"Telegram Poll Error: {e}")
 
-send_telegram("🤖 BOT RESTARTED - 7 PAIRS + ROTATION\n✅ Group A: EUR/USD, GBP/USD, USD/JPY, EUR/JPY\n✅ Group B: AUD/USD, USD/CAD, GBP/JPY\n✅ Auto te ghure ghure check hobe, Block khabe na\n✅ Heartbeat: 10 min por por BOT ALIVE")
-print("BOT Started - 7 Pairs Rotation")
+send_telegram("🤖 BOT RESTARTED - YAHOO FINANCE - 7 PAIRS\n✅ TradingView Block chilo, ekhon Yahoo Primary\n✅ Yahoo Fail korle TradingView Backup\n✅ Heartbeat: 10 min por por BOT ALIVE")
+print("BOT Started - Yahoo Finance")
 while True:
     try:
         now = now_bd()
@@ -349,7 +379,7 @@ while True:
                 check_all_markets(manual=False)
         if time.time() - last_heartbeat >= 600:
             last_heartbeat = time.time()
-            send_telegram(f"💓 BOT ALIVE - {now.strftime('%H:%M:%S')} BD Time\n✅ 7 Pair Rotation: Cholche\n✅ UptimeRobot: Up ache (Tumi agei lagaiso)\n⏳ Signal mille nijei pathabo")
+            send_telegram(f"💓 BOT ALIVE - {now.strftime('%H:%M:%S')} BD Time\n✅ 7 Pair Rotation: Cholche - Yahoo Finance\n✅ UptimeRobot: Up ache (Tumi agei lagaiso)\n⏳ Signal mille nijei pathabo")
         check_telegram_commands()
         check_results()
         time.sleep(1)
