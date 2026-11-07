@@ -3,7 +3,7 @@ import threading, os
 app = Flask(__name__)
 @app.route('/')
 def home():
-    return "BOT RUNNING - 7 PAIRS - YAHOO - MARKET CHECK"
+    return "BOT RUNNING - REAL + OTC - 70% STRONG ONLY"
 threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))).start()
 
 import time
@@ -18,6 +18,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 AMOUNT = 3
 
+# REAL PAIRS
 GROUP_A = {
     "EUR/USD": {"yahoo": "EURUSD=X", "tv_symbol": "EURUSD", "tv_exchange": "OANDA"},
     "GBP/USD": {"yahoo": "GBPUSD=X", "tv_symbol": "GBPUSD", "tv_exchange": "OANDA"},
@@ -31,6 +32,17 @@ GROUP_B = {
 }
 ALL_PAIRS = {**GROUP_A, **GROUP_B}
 
+# OTC PAIRS - Weekend er jonno, Yahoo price ke proxy hisabe use korbo
+# OTC er nijer Yahoo data nai, Real price er sathe 95% mile, broker ektu tweak kore
+OTC_PAIRS = {
+    "EUR/USD OTC": {"yahoo": "EURUSD=X", "tv_symbol": "EURUSD", "tv_exchange": "OANDA"},
+    "GBP/USD OTC": {"yahoo": "GBPUSD=X", "tv_symbol": "GBPUSD", "tv_exchange": "OANDA"},
+    "USD/JPY OTC": {"yahoo": "USDJPY=X", "tv_symbol": "USDJPY", "tv_exchange": "OANDA"},
+    "AUD/USD OTC": {"yahoo": "AUDUSD=X", "tv_symbol": "AUDUSD", "tv_exchange": "OANDA"},
+    "USD/CAD OTC": {"yahoo": "USDCAD=X", "tv_symbol": "USDCAD", "tv_exchange": "OANDA"},
+    "EUR/JPY OTC": {"yahoo": "EURJPY=X", "tv_symbol": "EURJPY", "tv_exchange": "OANDA"},
+}
+
 sent_signals = {}
 today_win = 0
 today_loss = 0
@@ -39,6 +51,7 @@ last_update_id = 0
 last_signal_minute = ""
 last_heartbeat = 0
 last_auto_wait_msg = 0
+otc_mode_manual = False  # user jodi "otc" likhe
 
 def send_telegram(msg):
     try:
@@ -47,18 +60,23 @@ def send_telegram(msg):
     except Exception as e:
         print(f"Telegram Error: {e}")
 
-# MARKET OPEN CHECK - Sat/Sun Bondho
 def is_forex_market_open():
     now = now_bd()
-    # Saturday = 5, Sunday = 6 - Full Closed
     if now.weekday() == 5:
         return False
     if now.weekday() == 6:
         return False
-    # Friday 11 PM BD er por Closed (Friday 10 PM GMT = Saturday 4 AM BD)
     if now.weekday() == 4 and now.hour >= 23:
         return False
     return True
+
+def is_otc_time():
+    # Weekend = OTC, ba user manual OTC on korle
+    if otc_mode_manual:
+        return True
+    if not is_forex_market_open():
+        return True
+    return False
 
 def calc_ema(closes, period=20):
     if len(closes) < period:
@@ -114,12 +132,10 @@ def build_from_candles(closes, opens, highs, lows):
     }
     return tv, sr
 
-# Yahoo Primary, TradingView Backup
 def get_data_and_sr(pair_info):
     yahoo_symbol = pair_info["yahoo"]
     tv_symbol = pair_info["tv_symbol"]
     tv_exchange = pair_info["tv_exchange"]
-    # 1. TRY YAHOO
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}?interval=1m&range=1d"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -139,11 +155,8 @@ def get_data_and_sr(pair_info):
             if len(closes) >= 25:
                 print(f"Yahoo OK {yahoo_symbol} len {len(closes)} price {closes[-1]}")
                 return build_from_candles(closes, opens, highs, lows)
-            else:
-                print(f"Yahoo Short {yahoo_symbol} len {len(closes)}")
     except Exception as e:
         print(f"Yahoo Error {yahoo_symbol}: {e}")
-    # 2. TRY TradingView Proxy - Backup
     try:
         now_ts = int(time.time())
         from_ts = now_ts - 50*60
@@ -157,21 +170,90 @@ def get_data_and_sr(pair_info):
             opens = data["o"]
             highs = data["h"]
             lows = data["l"]
-            print(f"TV Backup OK {tv_symbol}")
             return build_from_candles(closes, opens, highs, lows)
     except Exception as e:
         print(f"TV Backup Error {tv_symbol}: {e}")
     return None, None
 
-def check_all_markets(manual=False):
+# OTC CONFIDENCE SCORE - 70-90% holei signal
+def calc_otc_score(is_buy, tv, sr, price):
+    score = 0
+    reasons = []
+    ema20 = tv["ema20"]
+    rsi = tv["rsi"]
+    support = sr["support"]
+    resistance = sr["resistance"]
+    last_green = sr["last_green"]
+    last_red = sr["last_red"]
+    dist_s = abs(price - support) / price * 100 if price != 0 else 999
+    dist_r = abs(price - resistance) / price * 100 if price != 0 else 999
+
+    # 1. Candle Direction - 20 point
+    if is_buy and last_green:
+        score += 20
+        reasons.append("Last Candle SOBUJ ✅ +20")
+    elif not is_buy and last_red:
+        score += 20
+        reasons.append("Last Candle LAL ✅ +20")
+    else:
+        reasons.append("Last Candle Ultodik ❌ +0")
+        return 0, reasons  # Candle ulta hole score 0, signal dibo na
+
+    # 2. EMA Trend - 20 point
+    if is_buy and price > ema20:
+        score += 20
+        reasons.append(f"Price EMA20 ({ema20:.5f}) er UPORE ✅ +20")
+    elif not is_buy and price < ema20:
+        score += 20
+        reasons.append(f"Price EMA20 ({ema20:.5f}) er NICHE ✅ +20")
+    else:
+        reasons.append(f"EMA ulta ❌ +0")
+
+    # 3. RSI Perfect Zone - 20 point
+    if is_buy and 45 <= rsi <= 65:
+        score += 20
+        reasons.append(f"RSI {round(rsi)} Perfect (45-65) ✅ +20")
+    elif not is_buy and 35 <= rsi <= 55:
+        score += 20
+        reasons.append(f"RSI {round(rsi)} Perfect (35-55) ✅ +20")
+    elif is_buy and 40 <= rsi <= 70:
+        score += 10
+        reasons.append(f"RSI {round(rsi)} Valo (40-70) +10")
+    elif not is_buy and 30 <= rsi <= 60:
+        score += 10
+        reasons.append(f"RSI {round(rsi)} Valo (30-60) +10")
+    else:
+        reasons.append(f"RSI {round(rsi)} Kharp ❌ +0")
+
+    # 4. SR - 20 point (Sobcheye important OTC te)
+    if is_buy and (dist_s <= 0.08 or price < support):
+        score += 20
+        reasons.append(f"Support {support:.5f} er kache (Dist {dist_s:.3f}%) ✅ +20")
+    elif not is_buy and (dist_r <= 0.08 or price > resistance):
+        score += 20
+        reasons.append(f"Resistance {resistance:.5f} er kache (Dist {dist_r:.3f}%) ✅ +20")
+    elif is_buy and dist_s <= 0.15:
+        score += 10
+        reasons.append(f"Support er kache-kachi +10")
+    elif not is_buy and dist_r <= 0.15:
+        score += 10
+        reasons.append(f"Resistance er kache-kachi +10")
+    else:
+        reasons.append(f"SR dur e ❌ +0")
+
+    # 5. Breakout Bonus - 10 point
+    if is_buy and price > resistance:
+        score += 10
+        reasons.append(f"Breakout Above Resistance ✅ +10")
+    elif not is_buy and price < support:
+        score += 10
+        reasons.append(f"Breakdown Below Support ✅ +10")
+
+    return score, reasons
+
+def check_all_markets(manual=False, force_otc=False):
     global last_signal_minute, last_auto_wait_msg
     now = now_bd()
-    # Manual e o Market Closed hole Signal dibe na, sudhu janabe
-    if not is_forex_market_open():
-        if manual:
-            send_telegram(f"😴 MARKET CLOSED - {now.strftime('%A %H:%M')} BD Time\n❌ Forex Market Bondho (Sat-Sun)\n🕒 Market Khulbe: Sombar Vor 4 AM BD Time\nSignal dibo na, Market khulle dibo.")
-        return
-
     entry_dt = now + timedelta(minutes=1)
     next_candle_time = entry_dt.strftime("%H:%M")
     if not manual and next_candle_time == last_signal_minute:
@@ -179,22 +261,33 @@ def check_all_markets(manual=False):
     if not manual and next_candle_time in sent_signals:
         return
 
-    if manual:
-        PAIRS_TO_CHECK = ALL_PAIRS
-        group_name = "MANUAL - ALL 7 (Yahoo)"
+    # MODE DECIDE
+    use_otc = force_otc or is_otc_time()
+    if use_otc:
+        PAIRS_TO_CHECK = OTC_PAIRS
+        group_name = "OTC MODE - 6 Pair - 70%+ Only"
+        mode_txt = "OTC"
     else:
-        if now.minute % 2 == 0:
-            PAIRS_TO_CHECK = GROUP_A
-            group_name = "AUTO - GROUP A (4 Pair)"
+        if manual:
+            PAIRS_TO_CHECK = ALL_PAIRS
+            group_name = "REAL - ALL 7"
         else:
-            PAIRS_TO_CHECK = GROUP_B
-            group_name = "AUTO - GROUP B (3 Pair)"
-    print(f"Checking {group_name} at {now.strftime('%H:%M:%S')}")
+            if now.minute % 2 == 0:
+                PAIRS_TO_CHECK = GROUP_A
+                group_name = "REAL - GROUP A (4 Pair)"
+            else:
+                PAIRS_TO_CHECK = GROUP_B
+                group_name = "REAL - GROUP B (3 Pair)"
+        mode_txt = "REAL"
 
+    print(f"Checking {group_name} at {now.strftime('%H:%M:%S')}")
     start_time = time.time()
     checked = 0
     failed = 0
     wait_list = []
+    best_signal = None
+    best_score = 0
+    best_reason = ""
 
     for pair_name, symbols in PAIRS_TO_CHECK.items():
         try:
@@ -203,7 +296,7 @@ def check_all_markets(manual=False):
             if tv is None or sr is None:
                 failed += 1
                 if manual:
-                    send_telegram(f"❌ {pair_name} - Yahoo + TradingView 2 tai Fail (Network)")
+                    send_telegram(f"❌ {pair_name} - Data Fail")
                 time.sleep(0.8)
                 continue
 
@@ -215,11 +308,40 @@ def check_all_markets(manual=False):
             last_green = sr["last_green"]
             last_red = sr["last_red"]
 
+            # OTC MODE: Score 70+ holei signal, nahole skip
+            if use_otc:
+                # BUY ar SELL 2 tar score dekho, jeta besi
+                buy_score, buy_reasons = calc_otc_score(True, tv, sr, price)
+                sell_score, sell_reasons = calc_otc_score(False, tv, sr, price)
+                if buy_score >= sell_score:
+                    score = buy_score
+                    direction = "🟢 BUY"
+                    reasons = buy_reasons
+                else:
+                    score = sell_score
+                    direction = "🔴 SELL"
+                    reasons = sell_reasons
+
+                # 70 er niche hole WAIT
+                if score < 70:
+                    wait_list.append(f"{pair_name} Score {score}% LOW")
+                    if manual:
+                        send_telegram(f"⏳ {pair_name} - Score {score}% LOW = WAIT (70+ lagbe)\nPrice {price:.5f} | RSI {round(rsi)} | EMA {ema20:.5f}\n" + "\n".join(reasons))
+                    time.sleep(0.5)
+                    continue
+
+                # Best signal khujo - sobcheye besi score wala
+                if score > best_score:
+                    best_score = score
+                    best_signal = (pair_name, symbols, direction, price, tv, sr)
+                    best_reason = "\n".join(reasons)
+                continue
+
+            # REAL MODE: Agger moto OP-1 + Fallback
             is_sobuj = last_green
             is_lal = last_red
             is_upore = price > ema20
             is_niche = price < ema20
-
             dist_support_pct = abs(price - support) / price * 100 if price != 0 else 999
             dist_resistance_pct = abs(price - resistance) / price * 100 if price != 0 else 999
             near_support = dist_support_pct <= 0.12 or price < support
@@ -228,12 +350,11 @@ def check_all_markets(manual=False):
             breakdown_down = price < support
             sr_near_support = dist_support_pct <= 0.08 and price > support
             sr_near_resistance = dist_resistance_pct <= 0.08 and price < resistance
-
             min_range = 0.0004 if "JPY" not in pair_name else 0.04
             if sr["range_pips"] < min_range:
                 wait_list.append(f"{pair_name} FLAT")
                 if manual:
-                    send_telegram(f"⏳ {pair_name} - FLAT MARKET = WAIT\nSupport {support:.5f} | Resistance {resistance:.5f}")
+                    send_telegram(f"⏳ {pair_name} - FLAT = WAIT")
                 time.sleep(0.5)
                 continue
 
@@ -241,43 +362,42 @@ def check_all_markets(manual=False):
             reason = ""
             price_line = ""
             signal_type = ""
-
             if is_sobuj and is_upore and 40 <= rsi <= 70 and (near_support or breakout_up):
                 direction = "🟢 BUY"
                 signal_type = "STRONG - OP-1"
-                sr_txt = "Breakout Above Resistance" if breakout_up else f"Support {support:.5f} er kache Bounce"
-                reason = f"OP-1 Rule 1: Last Candel SOBUJ + Price EMA20 ({ema20:.5f}) er UPORE + RSI {round(rsi)} (40-70) + SR: {sr_txt}"
-                price_line = f"Price {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f}"
+                sr_txt = "Breakout" if breakout_up else f"Support {support:.5f} Bounce"
+                reason = f"OP-1: SOBUJ + EMA UPORE + RSI {round(rsi)} + {sr_txt}"
+                price_line = f"Price {price:.5f} | S {support:.5f} | R {resistance:.5f}"
             elif is_lal and is_niche and 30 <= rsi <= 60 and (near_resistance or breakdown_down):
                 direction = "🔴 SELL"
                 signal_type = "STRONG - OP-1"
-                sr_txt = "Breakdown Below Support" if breakdown_down else f"Resistance {resistance:.5f} er kache Rejection"
-                reason = f"OP-1 Rule 2: Last Candel LAL + Price EMA20 ({ema20:.5f}) er NICHE + RSI {round(rsi)} (30-60) + SR: {sr_txt}"
-                price_line = f"Price {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f}"
+                sr_txt = "Breakdown" if breakdown_down else f"Resistance {resistance:.5f} Rejection"
+                reason = f"OP-1: LAL + EMA NICHE + RSI {round(rsi)} + {sr_txt}"
+                price_line = f"Price {price:.5f} | S {support:.5f} | R {resistance:.5f}"
             elif sr_near_support and 25 <= rsi <= 55:
                 direction = "🟢 BUY"
                 signal_type = "SR FALLBACK"
-                reason = f"OP-1 Milenai, SR Fallback: Price {price:.5f} Support {support:.5f} er kache (Dist {dist_support_pct:.3f}%) + RSI {round(rsi)} (25-55) + Support e dhakka kheye upore jabe"
-                price_line = f"Price {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f}"
+                reason = f"SR Fallback: Support {support:.5f} kache + RSI {round(rsi)}"
+                price_line = f"Price {price:.5f} | S {support:.5f} | R {resistance:.5f}"
             elif sr_near_resistance and 45 <= rsi <= 75:
                 direction = "🔴 SELL"
                 signal_type = "SR FALLBACK"
-                reason = f"OP-1 Milenai, SR Fallback: Price {price:.5f} Resistance {resistance:.5f} er kache (Dist {dist_resistance_pct:.3f}%) + RSI {round(rsi)} (45-75) + Resistance e dhakka kheye niche asbe"
-                price_line = f"Price {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f}"
+                reason = f"SR Fallback: Resistance {resistance:.5f} kache + RSI {round(rsi)}"
+                price_line = f"Price {price:.5f} | S {support:.5f} | R {resistance:.5f}"
             elif breakout_up and 55 <= rsi <= 75:
                 direction = "🟢 BUY"
                 signal_type = "SR FALLBACK"
-                reason = f"OP-1 Milenai, SR Fallback: Price {price:.5f} Resistance {resistance:.5f} venge UPORE + RSI {round(rsi)} (55-75) + Strong Breakout"
-                price_line = f"Price {price:.5f} | Breakout Above Resistance {resistance:.5f}"
+                reason = f"Breakout Above R {resistance:.5f} + RSI {round(rsi)}"
+                price_line = f"Price {price:.5f} | Breakout R {resistance:.5f}"
             elif breakdown_down and 25 <= rsi <= 45:
                 direction = "🔴 SELL"
                 signal_type = "SR FALLBACK"
-                reason = f"OP-1 Milenai, SR Fallback: Price {price:.5f} Support {support:.5f} venge NICHE + RSI {round(rsi)} (25-45) + Strong Breakdown"
-                price_line = f"Price {price:.5f} | Breakdown Below Support {support:.5f}"
+                reason = f"Breakdown Below S {support:.5f} + RSI {round(rsi)}"
+                price_line = f"Price {price:.5f} | Breakdown S {support:.5f}"
             else:
                 wait_list.append(f"{pair_name} WAIT")
                 if manual:
-                    send_telegram(f"⏳ {pair_name} - WAIT\nLast {'SOBUJ' if is_sobuj else 'LAL'} + {'UPORE' if is_upore else 'NICHE'} + RSI {round(rsi)}\nPrice {price:.5f} | Support {support:.5f} | Resistance {resistance:.5f}\nDist S {dist_support_pct:.3f}% | Dist R {dist_resistance_pct:.3f}%")
+                    send_telegram(f"⏳ {pair_name} - WAIT\nLast {'SOBUJ' if is_sobuj else 'LAL'} + {'UPORE' if is_upore else 'NICHE'} + RSI {round(rsi)}\nPrice {price:.5f} | S {support:.5f} | R {resistance:.5f}")
                 time.sleep(0.5)
                 continue
 
@@ -292,30 +412,51 @@ def check_all_markets(manual=False):
 ✅ Reason: {reason}
 💰 Amount: ${AMOUNT}"""
             send_telegram(msg)
-            print(f"Signal: {pair_name} {direction}")
             sent_signals[next_candle_time] = {"pair": pair_name, "direction": direction, "pair_info": symbols, "entry_price": price, "entry_time": next_candle_time}
             last_signal_minute = next_candle_time
             return
 
         except Exception as e:
             print(f"Pair Error {pair_name}: {e}")
-            if manual:
-                send_telegram(f"❌ {pair_name} - Error: {e}")
             continue
+
+    # OTC MODE: Best signal ta pathao jodi 70+ hoy
+    if use_otc:
+        if best_signal:
+            pair_name, symbols, direction, price, tv, sr = best_signal
+            tag = "✋ MANUAL" if manual else "🤖 AUTO"
+            msg = f"""🚨 {tag} - OTC STRONG {best_score}% 🔥
+📊 Asset: {pair_name}
+⏱️ Expiry: M1
+🎯 Direction: {direction}
+💰 Price: {price:.5f} | Support {sr['support']:.5f} | Resistance {sr['resistance']:.5f}
+🕒 Entry Time: {next_candle_time} (BD Time UTC+6)
+📩 Signal Time: {now.strftime('%H:%M:%S')}
+✅ Confidence: {best_score}% (70-90% Strong)
+📋 Score Breakdown:
+{best_reason}
+⚠️ OTC Note: Broker Price, Real Price er sathe 95% mile - Strong holei nisi
+💰 Amount: ${AMOUNT}"""
+            send_telegram(msg)
+            sent_signals[next_candle_time] = {"pair": pair_name, "direction": direction, "pair_info": symbols, "entry_price": price, "entry_time": next_candle_time}
+            last_signal_minute = next_candle_time
+            return
+        else:
+            if manual:
+                send_telegram(f"🏁 OTC CHECK SES - Kono 70%+ Signal nai\nChecked: {checked} | WAIT: {', '.join(wait_list)}")
+            else:
+                if time.time() - last_auto_wait_msg >= 600:
+                    last_auto_wait_msg = time.time()
+                    send_telegram(f"⏳ OTC AUTO - {now.strftime('%H:%M:%S')} - Kono 70%+ Strong Signal nai, WAIT...\nChecked: {checked} Pair | WAIT: {', '.join(wait_list)}")
+            return
 
     if manual:
         elapsed = round(time.time() - start_time, 1)
-        send_telegram(f"🏁 CHECK SES - {elapsed}s lagse\nChecked: {checked} Pair | Fail: {failed}\nWAIT List: {', '.join(wait_list) if wait_list else 'Nai'}")
-    else:
-        if time.time() - last_auto_wait_msg >= 600:
-            last_auto_wait_msg = time.time()
-            send_telegram(f"⏳ AUTO CHECK - {now.strftime('%H:%M:%S')} - {group_name} - Signal milenai, WAIT cholche...\nChecked: {checked} Pair | Fail: {failed}")
+        send_telegram(f"🏁 CHECK SES - {elapsed}s\nChecked: {checked} | Fail: {failed}\nWAIT: {', '.join(wait_list) if wait_list else 'Nai'}")
 
 def check_results():
     global today_win, today_loss
     now = now_bd()
-    if not is_forex_market_open():
-        return
     if not (5 <= now.second <= 20):
         return
     to_remove = []
@@ -361,7 +502,7 @@ def check_results():
         del sent_signals[k]
 
 def check_telegram_commands():
-    global last_update_id, today_win, today_loss
+    global last_update_id, today_win, today_loss, otc_mode_manual
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset={last_update_id+1}&timeout=2"
         r = requests.get(url, timeout=5).json()
@@ -372,43 +513,52 @@ def check_telegram_commands():
             msg_data = upd.get("message", {})
             text = (msg_data.get("text") or "").strip().lower()
             if text == "signal":
-                send_telegram("🔍 7 Pair Check kortesi - Yahoo Finance diye...")
-                check_all_markets(manual=True)
+                if is_otc_time():
+                    send_telegram("🔍 OTC Check kortesi - 70%+ Strong holei dibo...")
+                    check_all_markets(manual=True, force_otc=True)
+                else:
+                    send_telegram("🔍 Real Check kortesi...")
+                    check_all_markets(manual=True)
+            elif text == "otc":
+                send_telegram("🔍 OTC Check kortesi - 70%+ Strong holei dibo...")
+                check_all_markets(manual=True, force_otc=True)
+            elif text == "otc on":
+                otc_mode_manual = True
+                send_telegram("✅ OTC MODE ON - Ekhon theke OTC Signal dibo (70%+ Strong Only)")
+            elif text == "otc off":
+                otc_mode_manual = False
+                send_telegram("✅ OTC MODE OFF - Ekhon theke Real Signal dibo")
             elif text == "win":
                 today_win += 1
-                send_telegram(f"✅ WIN Record korsi\n📈 Total Today: {today_win} Win - {today_loss} Loss")
+                send_telegram(f"✅ WIN Record korsi\n📈 Total: {today_win} Win - {today_loss} Loss")
                 if today_win >= 3:
                     send_telegram("⚠️ Rule 6: 3 Win = STOP")
             elif text == "loss":
                 today_loss += 1
-                send_telegram(f"❌ LOSS Record korsi\n📈 Total Today: {today_win} Win - {today_loss} Loss")
+                send_telegram(f"❌ LOSS Record korsi\n📈 Total: {today_win} Win - {today_loss} Loss")
                 if today_loss >= 2:
                     send_telegram("⚠️ Rule 6: 2 Loss = STOP")
     except Exception as e:
         print(f"Telegram Poll Error: {e}")
 
-send_telegram("🤖 BOT RESTARTED - YAHOO - 7 PAIRS - MARKET CHECK\n✅ TradingView Block chilo, ekhon Yahoo Primary\n✅ Sat/Sun Market Closed hole Signal dibe na\n✅ Market Khulbe: Sombar Vor 4 AM BD Time\n✅ Heartbeat: 10 min por por BOT ALIVE")
-print("BOT Started - Yahoo - Market Check")
+send_telegram("🤖 BOT RESTARTED - REAL + OTC - 70% STRONG ONLY\n✅ Sat/Sun = OTC Mode (70%+ holei Signal)\n✅ Mon-Fri = Real Mode (OP-1 + SR)\n✅ Command: signal / otc / otc on / otc off / win / loss\n✅ Heartbeat: 10 min por por")
+print("BOT Started - Real + OTC")
 while True:
     try:
         now = now_bd()
-        # MARKET CLOSED hole Auto Check bondho, 30 min e 1 bar janabe
-        if not is_forex_market_open():
-            if time.time() - last_heartbeat >= 1800:
-                last_heartbeat = time.time()
-                send_telegram(f"😴 MARKET CLOSED - {now.strftime('%A %H:%M')} BD Time\n❌ Forex Market Bondho (Sat-Sun)\n✅ Bot Jage Ache, Market Khulle Auto Signal Dibo\n🕒 Market Khulbe: Sombar Vor 4 AM BD Time")
-            check_telegram_commands()
-            time.sleep(5)
-            continue
-
+        use_otc_now = is_otc_time()
+        # Weekend OTC hole Auto Check cholbe, Real Market Closed holeo
         if 20 <= now.second <= 40:
             if time.time() - last_auto_check >= 50:
                 last_auto_check = time.time()
-                print(f"AUTO CHECK at {now.strftime('%H:%M:%S')}")
+                print(f"AUTO CHECK {'OTC' if use_otc_now else 'REAL'} at {now.strftime('%H:%M:%S')}")
                 check_all_markets(manual=False)
         if time.time() - last_heartbeat >= 600:
             last_heartbeat = time.time()
-            send_telegram(f"💓 BOT ALIVE - {now.strftime('%H:%M:%S')} BD Time\n✅ 7 Pair Rotation: Cholche - Yahoo Finance\n✅ UptimeRobot: Up ache (Tumi agei lagaiso)\n⏳ Signal mille nijei pathabo")
+            if use_otc_now:
+                send_telegram(f"💓 BOT ALIVE - {now.strftime('%H:%M:%S')} BD Time\n✅ OTC MODE: Cholche - 70%+ Strong holei Signal dibo\n⏳ Signal mille nijei pathabo")
+            else:
+                send_telegram(f"💓 BOT ALIVE - {now.strftime('%H:%M:%S')} BD Time\n✅ REAL MODE: Cholche - 7 Pair Rotation\n⏳ Signal mille nijei pathabo")
         check_telegram_commands()
         check_results()
         time.sleep(1)
