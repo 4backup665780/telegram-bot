@@ -1,15 +1,3 @@
-ঠিক আছে ভাই, তাহলে আমি *৭ টা Pair* করে দিলাম, ব্লক যাতে না খায় ওইভাবে *Rotation* দিয়ে।
-
-*নতুন ২ টা যোগ করলাম:*
-- ৬. EUR/JPY
-- ৭. GBP/JPY
-
-*Rotation কিভাবে কাজ করবে:*
-- জোড় মিনিটে: EUR/USD, GBP/USD, USD/JPY, EUR/JPY
-- বিজোড় মিনিটে: AUD/USD, USD/CAD, GBP/JPY
-- মানে প্রতি মিনিটে ৩-৪ টা করে Call হবে, আগের মতো ৫ টা না। Call কমবে, ব্লক খাবে না, কিন্তু ৭ টা Marketই কভার হবে।
-
-*ফুল কোড - ৭ Pair + Rotation + Heartbeat + No TA*
 from flask import Flask
 import threading, os
 app = Flask(__name__)
@@ -368,7 +356,3 @@ while True:
     except Exception as e:
         print(e)
         time.sleep(1)
-*`requirements.txt` এ খালি এই ২ টা রাখো:*
-Flask
-requests
-Deploy দিয়ে ১ বার `signal` লিখো, দেখবা ৭ টাই Check হবে।
