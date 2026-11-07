@@ -266,6 +266,8 @@ def check_all_markets(manual=False, force_otc=False):
                 sell_score = calc_otc_score(False, tv, sr, price)
                 if buy_score >= sell_score:
                     score = buy_score
+                    direction = "🔴 SELL" if False else "🟢 BUY"
+                    # uporer line ta thik korlam, niche sothik direction
                     direction = "🟢 BUY"
                 else:
                     score = sell_score
@@ -345,14 +347,15 @@ def check_all_markets(manual=False, force_otc=False):
                 continue
 
             tag = "✋ MANUAL" if manual else "🤖 AUTO"
-            msg = f"""🚨 {tag} - {signal_type}
+            # REAL SIGNAL - TOMAR ORDER E
+            msg = f"""🕒 Entry Time: {next_candle_time} (BD Time)
 📊 Asset: {pair_name}
-⏱️ Expiry: M1
 🎯 Direction: {direction}
+⏱️ Expiry: M1
+🚨 {tag} - {signal_type}
 💰 Price: {price_line}
-🕒 Entry Time: {next_candle_time} (BD Time)
-📩 Signal Time: {now.strftime('%H:%M:%S')}
-✅ Reason: {reason}"""
+✅ Reason: {reason}
+📩 Signal Time: {now.strftime('%H:%M:%S')}"""
             send_telegram(msg)
             sent_signals[next_candle_time] = {"pair": pair_name, "direction": direction, "pair_info": symbols, "entry_price": price, "entry_time": next_candle_time}
             last_signal_minute = next_candle_time
@@ -366,15 +369,15 @@ def check_all_markets(manual=False, force_otc=False):
         if best_signal:
             pair_name, symbols, direction, price, tv, sr = best_signal
             tag = "✋ MANUAL" if manual else "🤖 AUTO"
-            # SHORT OTC SIGNAL - Score Breakdown / OTC Note / Amount BAD
-            msg = f"""🚨 {tag} - OTC STRONG {best_score}% 🔥
+            # CORRECTION ORDER - TOMAR DEWA ORDER HUBOHU
+            msg = f"""🕒 Entry Time: {next_candle_time} (BD Time)
 📊 Asset: {pair_name}
-⏱️ Expiry: M1
 🎯 Direction: {direction}
+⏱️ Expiry: M1
+🚨 {tag} - OTC STRONG {best_score}% 🔥
 💰 Price: {price:.5f} | S {sr['support']:.5f} | R {sr['resistance']:.5f}
-🕒 Entry Time: {next_candle_time} (BD Time)
-📩 Signal Time: {now.strftime('%H:%M:%S')}
-✅ Confidence: {best_score}% Strong"""
+✅ Confidence: {best_score}% Strong
+📩 Signal Time: {now.strftime('%H:%M:%S')}"""
             send_telegram(msg)
             sent_signals[next_candle_time] = {"pair": pair_name, "direction": direction, "pair_info": symbols, "entry_price": price, "entry_time": next_candle_time}
             last_signal_minute = next_candle_time
